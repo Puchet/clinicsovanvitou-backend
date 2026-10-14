@@ -1,0 +1,21 @@
+{
+  "name": "sovanvitou-backend",
+  "version": "1.0.0",
+  "description": "REST API + static host for the Sovanvitou hospital management app (PostgreSQL, Node 22+)",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "seed": "node --disable-warning=ExperimentalWarning seed.js",
+    "migrate": "node --disable-warning=ExperimentalWarning migrate-sqlite-to-pg.js",
+    "test": "node --disable-warning=ExperimentalWarning test.js && node --disable-warning=ExperimentalWarning test-ui.js"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.14"
+  }
+}
