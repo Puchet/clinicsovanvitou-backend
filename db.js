@@ -9,9 +9,9 @@ try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env fi
 pg.types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
 
 const RES = {
-  patients:      { cols: { name: 's!', latin_name: 's', age: 'i', age_unit: 's', dob: 's', sex: 's', phone: 's', addr: 's', type: 's', unpaid: 'b', khmer: 'b', nssf: 'b', pet: 'b', nssf_id: 's', national_id: 's', complaints: 'x', history: 'x', reg_date: 's', photo: 's' }, search: ['name', 'latin_name', 'phone', 'addr', 'nssf_id', 'national_id'], order: 'id DESC' },
+  patients:      { cols: { name: 's!', latin_name: 's', age: 'i', age_unit: 's', dob: 's', sex: 's', phone: 's', addr: 's', type: 's', room: 's', bed: 's', unpaid: 'b', khmer: 'b', nssf: 'b', pet: 'b', nssf_id: 's', national_id: 's', complaints: 'x', history: 'x', reg_date: 's', photo: 's' }, search: ['name', 'latin_name', 'phone', 'addr', 'nssf_id', 'national_id'], order: 'id DESC' },
   appointments:  { cols: { name: 's!', svc: 's', date: 's', time: 's', doc: 's', phone: 's', st: 's' }, search: ['name', 'svc', 'doc', 'phone'], order: 'date DESC, id DESC' },
-  ipd:           { cols: { name: 's!', code: 's', room: 's', paid: 'b', out: 'b' }, search: ['name', 'code', 'room'], order: 'id DESC' },
+  ipd:           { cols: { name: 's!', code: 's', room: 's', bed: 's', paid: 'b', out: 'b' }, search: ['name', 'code', 'room', 'bed'], order: 'id DESC' },
   doctors:       { cols: { name: 's!', role: 's', code: 's', phone: 's', av: 's', photo: 's' }, search: ['name', 'code', 'role'], order: 'id' },
   medicines:     { cols: { name: 's!', price: 'i', stock: 'i', photo: 's' }, search: ['name'], order: 'LOWER(name)' },
   services:      { cols: { name: 's!', price: 'i' }, search: ['name'], order: 'LOWER(name)' },

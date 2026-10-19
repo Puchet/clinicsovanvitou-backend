@@ -18,7 +18,7 @@ server.listen(0, '127.0.0.1', async () => {
     window: { print() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, MutationObserver: class { observe() {} }, NodeFilter: { SHOW_TEXT: 4 },
     matchMedia: () => ({ matches: false }), requestAnimationFrame: (f) => f(), confirm: () => true,
     fetch: (u, o) => fetch(base + u, o),
-    FormData: class { constructor(f) { this.m = (f && f.__m) || {}; } get(k) { return this.m[k] ?? null; } getAll(k) { return [].concat(this.m[k] ?? []); } },
+    FormData: class { constructor(f) { this.m = (f && f.__m) || {}; } get(k) { return this.m[k] ?? null; } getAll(k) { return [].concat(this.m[k] ?? []); } [Symbol.iterator]() { return Object.entries(this.m)[Symbol.iterator](); } },
     Blob: class { constructor(p) { this.p = p; } },
   });
   ctx.URL = Object.assign(function () {}, { createObjectURL: (b) => { downloads.blob = b; return 'blob:x'; }, revokeObjectURL() {} });
@@ -123,6 +123,17 @@ server.listen(0, '127.0.0.1', async () => {
 
     // patient name is clickable in the list; calendar adds an appointment through the modal
     run('rt="pt"'); assert.ok(run('R.pt()').includes('data-a="open:') && run('R.pt()').includes('data-a="reg"')); ok('patient list opens patient file and registration form');
+    html = run('R.pt()'); assert.ok(html.includes(`data-a="ptbed:${p.id}"`), 'patient row is missing the bed information button');
+    await run(`api('POST','ipd',{name:'Test Patient',code:'${p.id}',room:'',paid:0,out:0})`); await run('load()');
+    run(`pAct('ptbed','${p.id}')`); const bedModal = els['#mf'].innerHTML;
+    assert.ok(bedModal.includes('Update Bed Information') && bedModal.includes('Room Number') && bedModal.includes('Bed Number'));
+    ctx.__event = { preventDefault() {}, target: { __m: { room: 'A-01', bed: 'B-02' } } };
+    await run(`$('#mf').onsubmit(__event)`); await run('load()');
+    const savedBed = run(`D.pt.find(x=>x.id==${p.id})`), savedIpd = run(`D.ipd.find(x=>x.code=='${p.id}')`);
+    assert.equal(savedBed.room, 'A-01'); assert.equal(savedBed.bed, 'B-02');
+    assert.equal(savedIpd.room, 'A-01'); assert.equal(savedIpd.bed, 'B-02');
+    assert.ok(run("tp('ipd')").includes('A-01') && run("tp('ipd')").includes('B-02'));
+    ok('patient bed update synchronizes the active IPD record and IPD list');
     console.log('\nAll UI tests passed.'); process.exitCode = 0;
   } catch (e) { console.error('\nFAILED:', e.stack || e.message); process.exitCode = 1; }
   server.close(async () => {
