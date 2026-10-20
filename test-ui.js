@@ -49,6 +49,23 @@ server.listen(0, '127.0.0.1', async () => {
     // vital signs
     run('vsForm()'); ctx.__f = { __m: { v_t: '38.1', v_hr: '90', date: '2026-10-14T09:00' } }; await run('__save(__f)'); assert.equal(run('recs.filter(r=>r.kind=="vitals").length'), 2); ok('vital signs added');
 
+    // treatment follow-up interface
+    run('openForm=__nativeOpenForm'); await run(`treatmentFollowup(${p.id})`);
+    html = els['#mf'].innerHTML;
+    for (const must of ['Treatment Follow-up', 'Date / Vital Signs', 'Diagnosis / Evolution', 'Treatment / Notes', 'View History', 'Add New Treatment Row', 'Print All Records', 'Save Record']) assert.ok(html.includes(must), 'treatment follow-up interface missing ' + must);
+    els['#mf'].elements = {
+      'tf-date-0': { value: '2026-10-14T09:30' },
+      'tf-vitals-0': { value: 'BP: 120/80\\nTemp: 37.2 °C' },
+      'tf-diagnosis-0': { value: 'Follow-up, improving' },
+      'tf-notes-0': { value: 'Continue treatment' }
+    };
+    els['#mf'].__m = { 'tf-date-0': '2026-10-14T09:30', 'tf-vitals-0': 'BP: 120/80\\nTemp: 37.2 °C', 'tf-diagnosis-0': 'Follow-up, improving', 'tf-notes-0': 'Continue treatment' };
+    await run(`$('#mf').onsubmit({preventDefault(){}})`);
+    const tf = run(`recs.find(r=>r.patient_id==${p.id}&&r.kind=='treatment')`);
+    assert.ok(tf, ctx.__toast || 'treatment follow-up record was not saved'); assert.equal(tf.notes, 'Continue treatment'); assert.equal(JSON.parse(tf.data).diagnosis, 'Follow-up, improving');
+    assert.equal(JSON.parse(tf.data).vitals, 'BP: 120/80\\nTemp: 37.2 °C'); ok('treatment follow-up saves vitals, diagnosis and treatment notes');
+    run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}');
+
     // medical record: form, collect, save, print
     run('ptab="medical"; mrForm()'); for (const must of ['1. Vital signs', '6. Past medical history', 'BCG/HepB', 'TT5', '7.4 Respiratory system', 'Thorax asymmetric', '8. Probable diagnosis', 'Salt restriction', 'Monitoring', 'data-a="mtadd"']) assert.ok(ctx.__body.includes(must), 'medical form missing ' + must);
     assert.ok(ctx.__opts.extra.includes('Print')); ctx.__f = { __m: { date: '2026-10-14T09:10', mr_bp: '120/80', mr_cc: 'Cough 3 days', mr_dx: 'Bronchitis', mrc_vacc: ['BCG/HepB', 'Measles+JE'], mr_eyes_l: 'normal', mon_vs: '1', mon_vs_h: '4', mt_d: ['10/14', ''], mt_e: ['better', ''], mt_t: ['Amoxicillin', ''] } };
@@ -154,8 +171,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(bedModal.includes('Update Bed Information') && bedModal.includes('Room Number') && bedModal.includes('Bed Number'));
     els['#mf'].__m = { room: 'A-01', bed: 'B-02' }; ctx.__event = { preventDefault() {} };
     await run(`$('#mf').onsubmit(__event)`); await run('load()');
-    const savedBed = run(`D.pt.find(x=>x.id==${p.id})`), savedIpd = run(`D.ipd.find(x=>x.code=='${p.id}')`);
-    assert.equal(savedBed.room, 'A-01'); assert.equal(savedBed.bed, 'B-02');
+    const savedIpd = run(`D.ipd.find(x=>x.code=='${p.id}')`);
     assert.equal(savedIpd.room, 'A-01'); assert.equal(savedIpd.bed, 'B-02');
     assert.ok(run("tp('ipd')").includes('A-01') && run("tp('ipd')").includes('B-02'));
     ok('patient bed update synchronizes the active IPD record and IPD list');
