@@ -26,6 +26,7 @@ server.listen(0, '127.0.0.1', async () => {
   vm.runInContext(fs.readFileSync(path.join(frontendDir, 'app.js'), 'utf8'), ctx);
   vm.runInContext(fs.readFileSync(path.join(frontendDir, 'patient.js'), 'utf8'), ctx);
   const run = (code) => vm.runInContext(code, ctx);
+  ctx.__nativeOpenForm = run('openForm');
   try {
     await (await fetch(base + '/api/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     run(`tok=null`); const lg = await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
@@ -90,11 +91,26 @@ server.listen(0, '127.0.0.1', async () => {
     ok('Treatment Schedule panel has tabs, total, Invoice, Add Schedule, CNF, Print and note box');
     run('schForm()'); ctx.__f = { __m: { date: '2026-10-14', amount: '50000', dx: 'Acne', notes: 'Peel session 1', done: null } }; await run('__save(__f)');
     ctx.__f = { __m: { date: '2026-10-21', amount: '30000', dx: 'Acne', notes: 'Peel session 2', done: '1' } }; run('schForm()'); await run('__save(__f)');
-    assert.equal(run('schRows().length'), 2); assert.equal(run('schTotal()'), 80000); html = run('recPanel()'); assert.ok(html.includes('Peel session 1') && html.includes('80,000')); ok('schedule rows added and the total is summed');
+    assert.equal(run('schRows().length'), 2); assert.equal(run('schTotal()'), 80000); assert.equal(run(`patientDue(${p.id})`), 80000);
+    assert.ok(run(`ipdRow({code:'${p.id}',name:'Test Patient',adm:'2026-10-14'})`).includes(`data-a="ptpay:${p.id}"`));
+    html = run('recPanel()'); assert.ok(html.includes('Peel session 1') && html.includes('80,000')); ok('schedule charges calculate the patient balance used by IPD billing status');
     const rid = run('schRows()[0].id'); run(`pAct('schdone','${rid}')`); await new Promise((r) => setTimeout(r, 300)); assert.equal(JSON.parse(run('schRows()[0]').data).done, 1); ok('Done tick can be toggled');
     await run(`api('POST','records',{patient_id:pdId,kind:'schedulenote',title:'Treatment2'})`); await run('loadRecs()'); assert.ok(run('schNames()').includes('Treatment2')); run('sch="Treatment2"'); assert.equal(run('schRows().length'), 0); assert.ok(run('recPanel()').includes('Treatment2')); ok('a second schedule (Treatment2) is a separate tab with its own rows');
     run('sch="Standard"'); ctx.__x = null; run('document.querySelector("#schnote").value="Header for print"'); await run(`(async()=>{pAct('schnotesave');await new Promise(r=>setTimeout(r,300))})()`); assert.equal(run('schNote().notes'), 'Header for print'); ok('schedule header note saved');
     run('schPrint(false)'); assert.ok(ctx.__pd[1].includes('Header for print') && ctx.__pd[1].includes('Peel session 2') && ctx.__pd[1].includes('80,000')); run('schPrint(true)'); assert.equal(ctx.__pd[0], 'Invoice'); assert.ok(ctx.__pd[1].includes('Acne – Peel session 1') && ctx.__pd[1].includes('Total')); ok('Print Schedule and Invoice produce documents');
+
+    // ---- Pay All ----
+    await run(`openPatient(${p.id})`); run('ptab="billing"'); html = run('recPanel()'); assert.ok(html.includes('data-a="payall"') && html.includes('Pay All') && html.includes('KHR 80,000'));
+    run('openForm=__nativeOpenForm'); await run('pAct("payall")');
+    assert.ok(els['#mf'].innerHTML.includes('Record payment') && /name="amount"[^>]*readonly/.test(els['#mf'].innerHTML) && els['#mf'].innerHTML.includes('name="method"'));
+    els['#mf'].__m = { amount: '80000', method: 'Bank' }; await run('$("#mf").onsubmit({preventDefault(){}})');
+    assert.equal(run('billTotals(recs).bal'), 0); assert.equal(run('jd(recs.find(r=>r.kind=="payment")).method'), 'Bank');
+    html = run('billPanel()'); const paidId = run('recs.find(r=>r.kind=="payment").id');
+    assert.ok(html.includes('KHR 80,000') && /data-a="payall" disabled/.test(html) && /data-a="recpay" disabled/.test(html));
+    assert.ok(html.includes(`data-a="payreceipt:${paidId}"`)); run(`pAct('payreceipt','${paidId}')`);
+    assert.equal(ctx.__pd[0], 'Payment Receipt'); assert.ok(ctx.__pd[1].includes('Test Patient') && ctx.__pd[1].includes('PAY-' + paidId) && ctx.__pd[1].includes('Bank') && ctx.__pd[1].includes('KHR 80,000'));
+    ok('paid billing history can print payment receipts; payment actions are disabled when no balance remains');
+    run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
 
     // ---- Consultation Form (CNF) ----
     run('cnfForm()'); for (const must of ['General Form', 'Assessment &amp; Plan', 'Form History', '1. Problems &amp; Concerns', 'Acne scars', '2. Skin type', '3. History of reactions', 'Product usage history', 'Medicine usage', 'Treatment history', 'Personal &amp; family history', 'Lifestyle', 'For women', 'Treatment Agreement', 'Acceptance &amp; Results', 'Guarantee of Care', 'Privacy Notice', 'Photo Consent', 'Responsibility', 'Other Notices', 'Payment Policy', 'Customer understanding', 'Warnings &amp; conditions', 'Personal interview', 'Customer name', 'Test Patient', 'No history records yet', 'Occupation', 'Address override']) assert.ok(ctx.__body.replace(/&amp;/g, '&amp;').includes(must) || ctx.__body.includes(must.replace('&amp;', '&')), 'CNF form missing ' + must);
@@ -125,9 +141,18 @@ server.listen(0, '127.0.0.1', async () => {
     run('rt="pt"'); assert.ok(run('R.pt()').includes('data-a="open:') && run('R.pt()').includes('data-a="reg"')); ok('patient list opens patient file and registration form');
     html = run('R.pt()'); assert.ok(html.includes(`data-a="ptbed:${p.id}"`), 'patient row is missing the bed information button');
     await run(`api('POST','ipd',{name:'Test Patient',code:'${p.id}',room:'',paid:0,out:0})`); await run('load()');
-    run(`pAct('ptbed','${p.id}')`); const bedModal = els['#mf'].innerHTML;
+    const ipdHtml = run(`ipdRow(D.ipd.find(x=>x.code=='${p.id}'))`);
+    assert.ok(ipdHtml.includes(`data-a="ipdbill:${p.id}"`), 'Paid status should open billing history');
+    await run(`(async()=>{pAct('ipdbill','${p.id}');await new Promise(r=>setTimeout(r,100))})()`);
+    const billingModal = els['#mf'].innerHTML;
+    assert.ok(billingModal.includes('Test Patient') && billingModal.includes('Billing history') && billingModal.includes('No unpaid bills found.') && billingModal.includes('Paid History') && billingModal.includes(`data-a="payreceipt:${paidId}"`));
+    run(`pAct('payreceipt','${paidId}')`);
+    assert.equal(ctx.__pd[0], 'Payment Receipt'); assert.ok(ctx.__pd[1].includes('KHR 80,000'));
+    ok('clicking Paid in IPD opens the billing-history modal with payment receipt actions');
+    run('rt="pt"');
+    run('openForm=__nativeOpenForm'); run(`pAct('ptbed','${p.id}')`); const bedModal = els['#mf'].innerHTML;
     assert.ok(bedModal.includes('Update Bed Information') && bedModal.includes('Room Number') && bedModal.includes('Bed Number'));
-    ctx.__event = { preventDefault() {}, target: { __m: { room: 'A-01', bed: 'B-02' } } };
+    els['#mf'].__m = { room: 'A-01', bed: 'B-02' }; ctx.__event = { preventDefault() {} };
     await run(`$('#mf').onsubmit(__event)`); await run('load()');
     const savedBed = run(`D.pt.find(x=>x.id==${p.id})`), savedIpd = run(`D.ipd.find(x=>x.code=='${p.id}')`);
     assert.equal(savedBed.room, 'A-01'); assert.equal(savedBed.bed, 'B-02');
