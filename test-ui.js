@@ -67,7 +67,9 @@ server.listen(0, '127.0.0.1', async () => {
 
     // patient file
     await run(`openPatient(${p.id})`); assert.equal(run('rt'), 'pd');
-    let html = run('R.pd()'); for (const must of ['Test Patient', 'Vital signs', 'Medical Record', 'MD History', 'BEU', 'Treatment Schedule', 'Consultation', 'Operation', 'Homecare', 'NSSF ID', 'National ID', 'id="pdd"']) assert.ok(html.includes(must), 'patient file missing ' + must);
+    let html = run('R.pd()'); for (const must of ['Test Patient', 'Vital signs', 'Medical Record', 'MD History', 'BEU', 'Treatment Schedule', 'Consultation', 'Operation', 'Homecare', 'Allergy History', 'Vaccination', 'Referral', 'Diagnosis History', 'Lab Orders', 'Imaging Orders', 'NSSF ID', 'National ID', 'id="pdd"']) assert.ok(html.includes(must), 'patient file missing ' + must);
+    assert.equal(run('PT.length'), 23, 'Patient Management should show exactly 23 sections');
+    ok('patient file displays all 23 Patient Management sections');
     assert.ok(html.includes('37.2') && html.includes('110/70'), 'vitals entered at registration should show'); ok('patient file shows header, menu and the vital signs entered at registration');
 
     // vital signs
@@ -88,6 +90,27 @@ server.listen(0, '127.0.0.1', async () => {
     const tf = run(`recs.find(r=>r.patient_id==${p.id}&&r.kind=='treatment')`);
     assert.ok(tf, ctx.__toast || 'treatment follow-up record was not saved'); assert.equal(tf.notes, 'Continue treatment'); assert.equal(JSON.parse(tf.data).diagnosis, 'Follow-up, improving');
     assert.equal(JSON.parse(tf.data).vitals, 'BP: 120/80\\nTemp: 37.2 °C'); ok('treatment follow-up saves vitals, diagnosis and treatment notes');
+    run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}');
+
+    const newPatientModules = [
+      ['allergy', { allergen: 'Penicillin', reaction: 'Rash', severity: 'Severe', status: 'Active', date: '2026-10-14', notes: 'Avoid penicillin' }, 'Penicillin'],
+      ['vaccination', { vaccine: 'Influenza', dose: 'Annual', lot: 'LOT-88', next_due: '2027-10-14', date: '2026-10-14', notes: 'No reaction' }, 'Influenza'],
+      ['referral', { referred_to: 'City Hospital', specialty: 'Cardiology', reason: 'Assessment', status: 'Pending', date: '2026-10-14', notes: 'Routine referral' }, 'City Hospital'],
+      ['diagnosis_history', { diagnosis: 'Asthma', code: 'J45', status: 'Chronic', date: '2026-10-14', notes: 'Reviewed' }, 'Asthma'],
+      ['laborder', { test: 'CBC', priority: 'Urgent', status: 'Requested', result: '', date: '2026-10-14', notes: 'Fasting' }, 'CBC'],
+      ['imagingorder', { modality: 'X-Ray', body_part: 'Chest', priority: 'Routine', status: 'Scheduled', indication: 'Cough', date: '2026-10-14', notes: '' }, 'Chest']
+    ];
+    run('openForm=__nativeOpenForm');
+    for (const [kind, values, expected] of newPatientModules) {
+      run(`ptab='${kind}';genForm()`);
+      assert.ok(els['#mf'].innerHTML.includes('Add '), `${kind} should open an add form`);
+      els['#mf'].__m = values;
+      await run(`$('#mf').onsubmit({preventDefault(){}})`);
+      const saved = run(`recs.find(r=>r.patient_id==${p.id}&&r.kind=='${kind}')`);
+      assert.ok(saved, ctx.__toast || `${kind} record was not saved`);
+      assert.ok(run('recPanel()').includes(expected), `${kind} details should render in its patient section`);
+    }
+    ok('allergy, vaccination, referral, diagnosis history, lab and imaging orders save and display records');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}');
 
     // medical record: form, collect, save, print
