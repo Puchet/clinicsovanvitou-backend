@@ -32,6 +32,30 @@ server.listen(0, '127.0.0.1', async () => {
     run(`tok=null`); const lg = await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     ctx.__t = lg.token; run('tok=__t; toast=function(m){__toast=m}'); await run('load()'); ok('app loads data from the API');
 
+    run(`rt='dr';doctorForm()`); let doctorHtml = els['#mf'].innerHTML;
+    for (const must of ['Add Doctor', 'Upload Photo', 'Staff ID (Required for Login)', 'Work Shift / Days', 'Department', 'Basic Salary ($)', 'Date Of Joining', 'Signature', 'drsig', 'drsigclear', 'Cancel', 'Save']) assert.ok(doctorHtml.includes(must), 'doctor form missing ' + must + ': ' + doctorHtml);
+    run(`doctorSignature={strokes:[{color:'#2563eb',points:[[0.1,0.2],[0.8,0.7]]}]}`);
+    els['#mf'].__m = { name: 'Dr. Follow-up', code: 'S002', role: 'Doctor', phone: '012 555 000', workdays: 'Mon-Fri', department: 'OPD', specialist: 'Nurse', basic_salary: '250.50', contract_type: 'Permanent', work_location: 'Main Clinic', date_joined: '2026-09-18', photo: '' };
+    await run(`$('#mf').onsubmit({preventDefault(){}})`);
+    const doctor = run(`D.dr.find(x=>x.code=='S002')`);
+    assert.ok(doctor); assert.equal(doctor.workdays, 'Mon-Fri'); assert.equal(doctor.department, 'OPD'); assert.equal(doctor.basic_salary_cents, 25050); assert.equal(JSON.parse(doctor.signature).strokes[0].points.length, 2);
+    run('doctorProfileId=null'); const doctorCards = run('R.dr()');
+    assert.ok(doctorCards.includes(`data-a="doctorhistory:${doctor.id}"`) && doctorCards.includes('title="Doctor history"'), 'doctor card should include history action');
+    run(`openDoctorHistory('${doctor.id}')`);
+    assert.equal(run('doctorTab'), 'timeline'); assert.ok(run('R.dr()').includes('Employment Timeline'), 'history action should open the doctor timeline');
+    run(`doctorForm(D.dr.indexOf(D.dr.find(x=>x.code=='S002')))`);
+    assert.ok(els['#mf'].innerHTML.includes('Edit Doctor') && els['#mf'].innerHTML.includes('Mon-Fri'));
+    run(`openDoctorProfile(${doctor.id})`); let doctorProfile = run('R.dr()');
+    for (const must of ['Payroll', 'Total Net Salary Paid', 'Total Gross Salary', 'Total Earning', 'Total Deduction', 'Add Payslip', 'No payslips available']) assert.ok(doctorProfile.includes(must), 'doctor profile payroll view missing ' + must);
+    run(`payrollForm(${doctor.id})`); doctorHtml = els['#mf'].innerHTML;
+    for (const must of ['Add New Payslip', 'period_month', 'period_year', 'date_start', 'date_end', 'Position Allowance', 'Overtime / Extra', 'Other Benefits', 'Deduction', 'Calculated Net Salary']) assert.ok(doctorHtml.includes(must), 'payslip form missing ' + must);
+    els['#mf'].__m = { period_month: '10', period_year: '2026', date_start: '2026-10-01', date_end: '2026-10-31', basic_cents: '250.50', position_allowance_cents: '10.25', overtime_cents: '5', benefits_cents: '2.50', deduction_cents: '3', note: 'October payroll' };
+    await run(`$('#mf').onsubmit({preventDefault(){}})`);
+    const slip = run(`D.payslips.find(x=>x.doctor_id==${doctor.id})`);
+    assert.ok(slip); assert.equal(slip.basic_cents, 25050); assert.equal(slip.deduction_cents, 300); assert.equal(slip.period_month, 10);
+    doctorProfile = run('R.dr()'); assert.ok(doctorProfile.includes('PAY-' + slip.id) && doctorProfile.includes('$265.25'));
+    ok('doctor profile shows payroll history and saved payslips with net salary');
+
     // registration with age modes, flags and vital signs
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}'); run('regForm()');
     for (const must of ['Basic information', 'Demographics', 'data-a="agem:dob"', 'name="nssf_id"', 'name="complaints"', 'name="reg_date"', 'data-a="vsbtn"', 'Register Patient']) assert.ok((ctx.__body + ctx.__opts.ok + ctx.__opts.extra).includes(must), 'registration form missing ' + must);

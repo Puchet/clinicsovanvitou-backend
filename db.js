@@ -12,7 +12,8 @@ const RES = {
   patients:      { cols: { name: 's!', latin_name: 's', age: 'i', age_unit: 's', dob: 's', sex: 's', phone: 's', addr: 's', type: 's', room: 's', bed: 's', unpaid: 'b', khmer: 'b', nssf: 'b', pet: 'b', nssf_id: 's', national_id: 's', complaints: 'x', history: 'x', reg_date: 's', photo: 's' }, search: ['name', 'latin_name', 'phone', 'addr', 'nssf_id', 'national_id'], order: 'id DESC' },
   appointments:  { cols: { name: 's!', svc: 's', date: 's', time: 's', doc: 's', phone: 's', st: 's' }, search: ['name', 'svc', 'doc', 'phone'], order: 'date DESC, id DESC' },
   ipd:           { cols: { name: 's!', code: 's', room: 's', bed: 's', paid: 'b', out: 'b' }, search: ['name', 'code', 'room', 'bed'], order: 'id DESC' },
-  doctors:       { cols: { name: 's!', role: 's', code: 's', phone: 's', av: 's', photo: 's' }, search: ['name', 'code', 'role'], order: 'id' },
+  doctors:       { cols: { name: 's!', role: 's', code: 's!', phone: 's', av: 's', workdays: 's', photo: 's', signature: 'j', department: 's', specialist: 's', epf_no: 's', basic_salary_cents: 'i', contract_type: 's', work_location: 's', date_joined: 's' }, search: ['name', 'code', 'role'], order: 'id' },
+  payslips:      { cols: { doctor_id: 'i!', period_month: 'i!', period_year: 'i!', date_start: 's!', date_end: 's!', basic_cents: 'i!', position_allowance_cents: 'i!', overtime_cents: 'i!', benefits_cents: 'i!', deduction_cents: 'i!', note: 'x' }, search: ['note'], order: 'period_year DESC, period_month DESC, id DESC' },
   medicines:     { cols: { name: 's!', price: 'i', stock: 'i', photo: 's' }, search: ['name'], order: 'LOWER(name)' },
   services:      { cols: { name: 's!', price: 'i' }, search: ['name'], order: 'LOWER(name)' },
   labs:          { cols: { name: 's!', price: 'i', cat: 's' }, search: ['name', 'cat'], order: 'LOWER(name)' },
@@ -132,6 +133,7 @@ async function initDb() {
         await p.query(`ALTER TABLE "${t}" ADD COLUMN IF NOT EXISTS "${c}" ${SQLT[ty[0]]} NOT NULL DEFAULT ${dflt(ty[0])}`);
       }
     }
+    await p.query('CREATE UNIQUE INDEX IF NOT EXISTS payslips_doctor_period_unique ON payslips(doctor_id, period_year, period_month)');
 
     // 2. Create clinic table
     await p.query(`CREATE TABLE IF NOT EXISTS clinic (

@@ -270,6 +270,34 @@ async function api(req, res, url) {
     const id = b === undefined ? null : Number(b);
     if (b !== undefined && (!Number.isInteger(id) || c !== undefined)) throw new HttpError(404, 'Not found');
     const withUser = (o) => { if (a === 'chat') o.user_id = user.id; if (a === 'records') o.created_by = user.id; return o; };
+    const validateResource = async (d, creating) => {
+      if (a === 'doctors' && d.code) {
+        const duplicate = await queryOne('SELECT id FROM doctors WHERE code=$1 AND id<>$2', [d.code, id || 0]);
+        if (duplicate) throw new HttpError(409, 'Staff ID already exists');
+      }
+      if (a === 'payslips') {
+        const doctorId = d.doctor_id;
+        if (creating && !doctorId) throw bad('doctor_id is required');
+        if (doctorId && !(await queryOne('SELECT 1 FROM doctors WHERE id=$1', [doctorId]))) throw bad('Doctor not found');
+        if ('period_month' in d && (d.period_month < 1 || d.period_month > 12)) throw bad('period_month must be between 1 and 12');
+        if ('period_year' in d && (d.period_year < 2000 || d.period_year > 2100)) throw bad('period_year is not valid');
+        const existing = id ? await queryOne('SELECT doctor_id,period_month,period_year,date_start,date_end,basic_cents,position_allowance_cents,overtime_cents,benefits_cents,deduction_cents FROM payslips WHERE id=$1', [id]) : null;
+        const doctor = doctorId || (existing && existing.doctor_id), month = d.period_month || (existing && existing.period_month), year = d.period_year || (existing && existing.period_year);
+        if (month && year && ('date_start' in d || 'date_end' in d || creating)) {
+          const start = d.date_start || (existing && existing.date_start), end = d.date_end || (existing && existing.date_end);
+          const prefix = `${year}-${String(month).padStart(2, '0')}-`;
+          if (!start || !end || !/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end || !start.startsWith(prefix) || !end.startsWith(prefix)) throw bad('Payslip date range must be within the selected month');
+        }
+        if (doctor && month && year) {
+          const duplicate = await queryOne('SELECT id FROM payslips WHERE doctor_id=$1 AND period_month=$2 AND period_year=$3 AND id<>$4', [doctor, month, year, id || 0]);
+          if (duplicate) throw bad('A payslip already exists for this month');
+        }
+        if (creating || existing) {
+          const amount = (key) => key in d ? d[key] : existing[key];
+          if (amount('deduction_cents') > amount('basic_cents') + amount('position_allowance_cents') + amount('overtime_cents') + amount('benefits_cents')) throw bad('deduction_cents cannot exceed total earnings');
+        }
+      }
+    };
     const needPatient = async (d, must) => {
       if (a !== 'records') return;
       if (must && !d.patient_id) throw bad('patient_id is required');
@@ -300,6 +328,7 @@ async function api(req, res, url) {
     }
     if (id === null && m === 'POST') {
       const d = withUser(clean(a, await readJson(req), false));
+      await validateResource(d, true);
       await needPatient(d, true);
       const cols = Object.keys(d);
       const params = cols.map((x) => d[x]);
@@ -314,6 +343,7 @@ async function api(req, res, url) {
     }
     if (id !== null && m === 'PUT') {
       const d = withUser(clean(a, await readJson(req), true));
+      await validateResource(d, false);
       await needPatient(d, false);
       if (a === 'chat') admin();
       const cols = Object.keys(d).filter((x) => names.includes(x));
@@ -328,6 +358,7 @@ async function api(req, res, url) {
       return send(res, 200, updated);
     }
     if (id !== null && m === 'DELETE') {
+      if (a === 'doctors' && await queryOne('SELECT 1 FROM payslips WHERE doctor_id=$1 LIMIT 1', [id])) throw new HttpError(409, 'Delete the doctor’s payslips before deleting the doctor');
       if (a === 'records') {
         const row = await queryOne('SELECT created_by FROM records WHERE id=$1', [id]);
         if (row && user.role !== 'admin' && row.created_by !== user.id) throw new HttpError(403, 'Only the author or an admin can delete this record');
