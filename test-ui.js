@@ -158,8 +158,13 @@ server.listen(0, '127.0.0.1', async () => {
     run('rt="pt"'); assert.ok(run('R.pt()').includes('data-a="open:') && run('R.pt()').includes('data-a="reg"')); ok('patient list opens patient file and registration form');
     html = run('R.pt()'); assert.ok(html.includes(`data-a="ptbed:${p.id}"`), 'patient row is missing the bed information button');
     await run(`api('POST','ipd',{name:'Test Patient',code:'${p.id}',room:'',paid:0,out:0})`); await run('load()');
-    const ipdHtml = run(`ipdRow(D.ipd.find(x=>x.code=='${p.id}'))`);
+    const ipdId = run(`D.ipd.find(x=>x.code=='${p.id}').id`), ipdHtml = run(`ipdRow(D.ipd.find(x=>x.code=='${p.id}'))`);
     assert.ok(ipdHtml.includes(`data-a="ipdbill:${p.id}"`), 'Paid status should open billing history');
+    assert.ok(ipdHtml.includes(`data-a="ipdtreat:${ipdId}"`), 'IPD treatment should open treatment follow-up');
+    run('openForm=__nativeOpenForm');
+    await run(`ipdTreat(${ipdId})`);
+    assert.ok(els['#mf'].innerHTML.includes('Treatment Follow-up') && els['#mf'].innerHTML.includes('Date / Vital Signs') && els['#mf'].innerHTML.includes('Diagnosis / Evolution'), 'IPD treatment should use the follow-up interface');
+    ok('IPD treatment action opens the Treatment Follow-up interface');
     await run(`(async()=>{pAct('ipdbill','${p.id}');await new Promise(r=>setTimeout(r,100))})()`);
     const billingModal = els['#mf'].innerHTML;
     assert.ok(billingModal.includes('Test Patient') && billingModal.includes('Billing history') && billingModal.includes('No unpaid bills found.') && billingModal.includes('Paid History') && billingModal.includes(`data-a="payreceipt:${paidId}"`));
