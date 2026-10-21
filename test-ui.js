@@ -88,7 +88,7 @@ server.listen(0, '127.0.0.1', async () => {
 
     // patient file
     await run(`openPatient(${p.id})`); assert.equal(run('rt'), 'pd');
-    let html = run('R.pd()'); for (const must of ['Test Patient', 'Vital signs', 'Medical Record', 'MD History', 'BEU', 'Treatment Schedule', 'Consultation', 'Operation', 'Homecare', 'Allergy History', 'Vaccination', 'Referral', 'Diagnosis History', 'Lab Orders', 'Imaging Orders', 'NSSF ID', 'National ID', 'id="pdd"']) assert.ok(html.includes(must), 'patient file missing ' + must);
+    let html = run('R.pd()'); for (const must of ['Test Patient', 'Vital signs', 'Medical Record', 'MD History', 'BEU', 'Treatment Schedule', 'Consultation', 'Operation', 'ស្នើសុំពិនិត្យ', 'Homecare', 'Allergy History', 'Vaccination', 'Referral', 'Diagnosis History', 'Lab Orders', 'Imaging Orders', 'NSSF ID', 'National ID', 'id="pdd"']) assert.ok(html.includes(must), 'patient file missing ' + must);
     assert.equal(run('PT.length'), 23, 'Patient Management should show exactly 23 sections');
     ok('patient file displays all 23 Patient Management sections');
     assert.ok(html.includes('37.2') && html.includes('110/70'), 'vitals entered at registration should show'); ok('patient file shows header, menu and the vital signs entered at registration');
