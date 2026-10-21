@@ -279,6 +279,23 @@ server.listen(0, '127.0.0.1', async () => {
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
 
     // ---- Medicines list and Add Medicine form ----
+    run('rt="pos";medicineFormOpen=false;medicineFormReturnPage=null');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'add:med' } }) }, preventDefault() {} });
+    assert.equal(run('rt'), 'med');
+    let posAddMedicineHtml = run('R.med()');
+    for (const must of ['Add New Medicine', 'Medicine Image', 'Drug name', 'Composition', 'In Stock', 'Sales unit', 'Expiration date', 'Notification date', 'Cancel', '＋ Add sales unit']) assert.ok(posAddMedicineHtml.includes(must), 'POS Add item should open the screenshot medicine form with ' + must);
+    assert.ok(!posAddMedicineHtml.includes('medicine-table-wrap') && !posAddMedicineHtml.includes('Import Excel'), 'POS Add item should show the form by itself');
+    const medicineCss = fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8');
+    assert.match(medicineCss, /\.medicine-unit-add\s*\{[^}]*width:\s*100%;/, 'sales-unit add action should span the form');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medformclose' } }) }, preventDefault() {} });
+    assert.equal(run('rt'), 'pos', 'cancelling an item added from POS should return to POS');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'add:med' } }) }, preventDefault() {} });
+    ctx.__medForm = { __m: { name: 'POS Added Medicine', composition: '250mg', stock: '8', photo: '', expiration_date: '', notification_date: '' }, querySelectorAll: () => [{ querySelector: (selector) => selector == '.unit-name' ? { value: 'Tablet' } : selector == '.unit-price' ? { value: '1250' } : { value: '1' } }] };
+    ctx.__medEvent = { preventDefault() {}, target: ctx.__medForm };
+    await run('medicineSave(__medEvent)');
+    assert.equal(run('rt'), 'pos', 'saving an item added from POS should return to POS');
+    assert.ok(run(`D.med.some(m=>m.name=="POS Added Medicine")`), 'medicine added from POS should be saved');
+    ok('POS Add item opens the screenshot medicine form and returns to POS after saving');
     run('rt="med";q="";medicineFormOpen=true;medicineEditIndex=null;render()'); let medicineHtml = run('R.med()');
     for (const must of ['Medicine Image', 'Drug name', 'Composition', 'In Stock', 'Sales unit', 'Unit name', 'Price (KHR)', 'Qty per unit', 'Expiration date', 'Notification date', 'medunitadd', 'Add']) assert.ok(medicineHtml.includes(must), 'medicine form missing ' + must);
     assert.ok(medicineHtml.includes('data-a="medimport"') && medicineHtml.includes('id="med-import-file"'), 'medicine page should offer Excel import');
@@ -294,7 +311,6 @@ server.listen(0, '127.0.0.1', async () => {
     medicineHtml = run('R.med()');
     for (const action of ['medstock', 'medcomposition', 'medqr', 'medbarcode']) assert.ok(medicineHtml.includes(`data-a="${action}:${medicineIndex}"`), 'medicine row missing ' + action + ' action');
     assert.ok(medicineHtml.includes('data-a="medlayout"') && medicineHtml.includes('Switch to Cards View') && !medicineHtml.includes('medlayout:table') && !medicineHtml.includes('medlayout:cards') && medicineHtml.includes(`data-a="medview:${medicine.id}"`), 'Medicine table should offer a single layout toggle and a detail view');
-    const medicineCss=fs.readFileSync(path.join(frontendDir,'styles.css'),'utf8');
     assert.match(medicineCss, /\.medicine-card\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\);/s, 'medicine card photo and details should each use half the card width');
     assert.match(medicineCss, /\.medicine-card-photo\s*\{[^}]*width:\s*calc\(100% - 12px\);[^}]*height:\s*auto;[^}]*aspect-ratio:\s*1;/s, 'medicine card photos should use a square crop at half card width');
     assert.match(medicineCss, /\.medicine-thumb\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/s, 'medicine table thumbnails should be square');
@@ -557,6 +573,21 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(exportedMedicineRow); assert.equal(exportedMedicineRow.getCell(10).value, '2027-06-30'); assert.equal(exportedMedicineRow.getCell(11).value, '2027-05-30'); assert.equal(exportedMedicineRow.getCell(14).value, '500mg capsule');
     const formulaRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(2).value == "'=SUM(1,1)");
     assert.ok(formulaRow); ok('Excel cells that start with formula characters are neutralised');
+    const posMedicine = run(`D.med.find(m=>m.name=='Amoxicillin')`);
+    assert.ok(posMedicine, 'POS print test requires the seeded Amoxicillin medicine');
+    run(`cart={['${posMedicine.id}']:2};rt='pos';printDoc=function(t,h,o){__posPrint=[t,h,o]}`);
+    html = run('R.pos()');
+    assert.ok(html.includes('data-a="posprint"') && html.includes('aria-label="Print total"'), 'POS total should include an accessible print icon');
+    assert.ok(/class="pos-checkout-actions"><button[^>]*data-a="co"[^>]*>Checkout<\/button><button[^>]*data-a="posprint"/.test(html), 'POS print icon should appear beside Checkout');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'posprint' } }) }, preventDefault() {} });
+    const posPrinted = run('__posPrint'), posTotal = Number(run(`D.med.find(m=>m.id==${posMedicine.id}).price*2`)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    assert.equal(posPrinted[0], ''); assert.ok(posPrinted[1].includes('Amoxicillin') && posPrinted[1].includes('>2</td>') && posPrinted[1].includes('KHR ' + posTotal));
+    assert.ok(posPrinted[1].includes('Invoice #: PREVIEW') && posPrinted[1].includes('សរុបរង:') && posPrinted[1].includes('សរុប:') && posPrinted[1].includes('Thank You For Your Business'));
+    assert.ok(posPrinted[2].headerHtml.includes('វិក័យប័ត្រ'), 'POS print should use the invoice header layout');
+    let printCalls = 0; ctx.window.print = () => { printCalls++; };
+    ctx.__nativePrintDoc('', posPrinted[1], { headerHtml: posPrinted[2].headerHtml, printImmediately: true });
+    assert.ok(els['#pa'].innerHTML.includes('Invoice #: PREVIEW') && els['#pa'].innerHTML.includes('Amoxicillin') && printCalls == 1, 'POS invoice should be populated before synchronously opening print');
+    run('cart={};rt="med";printDoc=__nativePrintDoc'); ok('POS total print icon prints current cart items and total');
     const realFetch = ctx.fetch;
     ctx.fetch = async () => ({ status: 404, ok: false, json: async () => ({ error: 'Not found' }) });
     await run('exportExcel()');
