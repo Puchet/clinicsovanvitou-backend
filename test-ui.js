@@ -96,6 +96,49 @@ server.listen(0, '127.0.0.1', async () => {
     // vital signs
     run('vsForm()'); ctx.__f = { __m: { v_t: '38.1', v_hr: '90', date: '2026-10-14T09:00' } }; await run('__save(__f)'); assert.equal(run('recs.filter(r=>r.kind=="vitals").length'), 2); ok('vital signs added');
 
+    // investigation request service picker
+    await run(`openPatient(${baby.id})`);
+    run("D.sv.push({id:991,name:'Investigation Test',price:12500},{id:992,name:'Other Service',price:20000});ptab='investigation'");
+    html = run('recPanel()');
+    for (const must of ['Request service', 'id="investigation-service-search"', 'data-investigation-service="991"', 'Investigation Test', 'KHR 12,500', 'data-a="investigation-request"']) assert.ok(html.includes(must), 'investigation service picker missing ' + must);
+    const investigationSearchHandler = listeners.input.find((fn) => fn.toString().includes('investigation-service-search'));
+    const investigationSelectionHandler = listeners.change.find((fn) => fn.toString().includes('investigationService'));
+    assert.ok(investigationSearchHandler && investigationSelectionHandler, 'investigation search and selection handlers should be registered');
+    investigationSearchHandler({ target: { id: 'investigation-service-search', value: 'other' } });
+    assert.ok(els['#investigation-service-list'].innerHTML.includes('Other Service') && !els['#investigation-service-list'].innerHTML.includes('Investigation Test'), 'service search should filter the service cards');
+    investigationSearchHandler({ target: { id: 'investigation-service-search', value: '' } });
+    investigationSelectionHandler({ target: { dataset: { investigationService: '991' }, checked: true, closest: () => ({ classList: { toggle() {} } }) } });
+    assert.ok(run("investigationSelection.has('991')"), 'checking a service should add it to the selection');
+    await run('requestInvestigationServices()');
+    let investigation = run(`recs.find(r=>r.patient_id==${baby.id}&&r.kind=='investigation')`);
+    assert.ok(investigation, ctx.__toast || 'investigation request was not saved');
+    assert.deepEqual(JSON.parse(investigation.data).items.map((item) => item.name), ['Investigation Test']);
+    assert.ok(run('recPanel()').includes('Requested services') && run('recPanel()').includes('Investigation Test'));
+    await run(`changeInvestigationQuantity(${investigation.id},0,1)`);
+    assert.equal(run(`patientDue(${baby.id})`), 25000);
+    assert.equal(run(`JSON.parse(recs.find(r=>r.id==${investigation.id}).data).items[0].quantity`), 2);
+    await run(`changeInvestigationQuantity(${investigation.id},0,-1)`);
+    assert.equal(run(`patientDue(${baby.id})`), 12500);
+    assert.ok(run('billPanel()').includes('data-a="svcplus:') && run('billPanel()').includes('data-a="svcminus:'));
+    await run(`changeInvestigationQuantity(${investigation.id},0,-1)`);
+    assert.equal(run(`patientDue(${baby.id})`), 0, 'decrementing service quantity to zero should remove the service charge');
+    run("D.sv.push({id:991,name:'Investigation Test',price:12500})");
+    run("investigationSelection.add('991')");
+    await run('requestInvestigationServices()');
+    investigation = run(`recs.find(r=>r.patient_id==${baby.id}&&r.kind=='investigation')`);
+    assert.equal(run(`billTotals(recs).ch`), 12500); assert.equal(run(`patientDue(${baby.id})`), 12500);
+    assert.equal(run(`billingOutstandingItems([{kind:'investigation',data:JSON.stringify({items:[{name:'Echo',price:12500}]})},{kind:'payment',data:JSON.stringify({amount:5000})}])[0].price`), 7500);
+    run("ptab='billing'"); html = run('recPanel()');
+    for (const must of ['Service Charges', 'Investigation Test', 'Total Unpaid Amount', 'KHR 12,500', 'Paid History']) assert.ok(html.includes(must), 'billing history missing investigation charge or screenshot layout: ' + must);
+    await run(`pAct('payall')`);
+    els['#mf'].__m = { amount: '12500', method: 'Cash' };
+    await run('__save({__m:{"amount":"12500","method":"Cash"}})');
+    assert.equal(run(`patientDue(${baby.id})`), 0);
+    html = run('billPanel()');
+    assert.ok(html.includes('Ref: PAY-') && html.includes('Items:</span><span>1</span>') && html.includes('Total Paid') && html.includes('KHR 12,500'));
+    ok('investigation services appear as unpaid billing line items and update the patient balance');
+    await run(`openPatient(${p.id})`);
+
     // treatment follow-up interface
     run('openForm=__nativeOpenForm'); await run(`treatmentFollowup(${p.id})`);
     html = els['#mf'].innerHTML;
