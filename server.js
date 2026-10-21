@@ -74,7 +74,7 @@ function clean(name, body, partial, spec = RES[name]) {
       if (kind === 'j' && typeof v === 'object' && v !== null && !Array.isArray(v)) v = JSON.stringify(v);
       else if (typeof v !== 'string') v = v == null ? '' : String(v);
       v = v.trim();
-      const max = kind === 'j' ? 60000 : kind === 'x' ? 10000 : 255;
+      const max = kind === 'j' ? 60000 : kind === 'x' ? (name === 'echo' && c === 'sections' ? 500000 : 10000) : 255;
       if (v.length > max) throw bad(`${c} is too long (max ${max})`);
       if (req && !v) throw bad(`${c} cannot be empty`);
       if (IMG.includes(c) && v && !PHOTO_RE.test(v)) throw bad(`${c} is not a valid picture filename`);
@@ -126,6 +126,80 @@ function clean(name, body, partial, spec = RES[name]) {
   if (name === 'records') {
     if ('kind' in out && !KINDS.includes(out.kind)) throw bad('kind is not valid');
     if ('color' in out && out.color && !/^#[0-9a-fA-F]{6}$/.test(out.color)) throw bad('color is not valid');
+  }
+  if (name === 'echo') {
+    for (const key of ['sections', 'fields']) {
+      if (!(key in out)) continue;
+      let values;
+      try { values = JSON.parse(out[key] || '[]'); } catch { throw bad(`${key} must be a valid list`); }
+      if (!Array.isArray(values) || values.length > (key === 'sections' ? 50 : 100)) throw bad(`${key} must contain a valid number of entries`);
+      if (key === 'fields') {
+        values = values.map((value) => {
+          const field = String(value ?? '').trim();
+          if (!field || field.length > 100) throw bad('Each additional field must have a name up to 100 characters');
+          return field;
+        });
+      } else {
+        values = values.map((section) => {
+          if (!section || typeof section !== 'object' || Array.isArray(section)) throw bad('Each section must be an object');
+          const title = String(section.title ?? '').trim(), content = String(section.content ?? '');
+          if (title.length > 255 || content.length > 100000) throw bad('Section title or content is too long');
+          const fields = section.fields == null ? [] : section.fields;
+          if (!Array.isArray(fields) || fields.length > 100) throw bad('Each section can contain up to 100 additional fields');
+          const safeFields = fields.map((value) => {
+            const field = String(value ?? '').trim();
+            if (!field || field.length > 100) throw bad('Each additional field must have a name up to 100 characters');
+            return field;
+          });
+          const safeContent = content
+            .replace(/<!--[\s\S]*?-->/g, '')
+            .replace(/<(script|style|iframe|object|embed|svg|math|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+            .replace(/<(script|style|iframe|object|embed|svg|math|template)\b[^>]*\/?>/gi, '')
+            .replace(/<\/?(?!p\b|div\b|span\b|strong\b|b\b|em\b|i\b|u\b|ol\b|ul\b|li\b|table\b|thead\b|tbody\b|tr\b|th\b|td\b|h[1-6]\b|blockquote\b|br\b|a\b|img\b|font\b)[a-z][^>]*>/gi, '')
+            .replace(/<(p|div|span|strong|b|em|i|u|ol|ul|li|table|thead|tbody|tr|th|td|h[1-6]|blockquote|a|img|font)\b([^>]*)>/gi, (_, tag, attributes) => {
+              if (tag.toLowerCase() === 'font') {
+                const colorMatch = /\bcolor\s*=\s*(["']?)(#[0-9a-f]{6})\1/i.exec(attributes);
+                return colorMatch ? `<span style="color:${colorMatch[2].toLowerCase()}">` : '<span>';
+              }
+              if (tag.toLowerCase() === 'a') {
+                const hrefMatch = /\bhref\s*=\s*(["'])(.*?)\1/i.exec(attributes);
+                if (!hrefMatch) return '<a>';
+                try {
+                  const url = new URL(hrefMatch[2].replace(/&amp;/g, '&'));
+                  return ['http:', 'https:'].includes(url.protocol) ? `<a href="${escapeXml(url.href)}" target="_blank" rel="noopener noreferrer">` : '<a>';
+                } catch { return '<a>'; }
+              }
+              if (tag.toLowerCase() === 'img') {
+                const srcMatch = /\bsrc\s*=\s*(["'])(.*?)\1/i.exec(attributes);
+                if (!srcMatch) return '';
+                try {
+                  const url = new URL(srcMatch[2].replace(/&amp;/g, '&'));
+                  if (url.protocol !== 'https:') return '';
+                  const altMatch = /\balt\s*=\s*(["'])(.*?)\1/i.exec(attributes);
+                  return `<img src="${escapeXml(url.href)}" alt="${escapeXml(altMatch ? altMatch[2] : '')}">`;
+                } catch { return ''; }
+              }
+              if (!['table', 'th', 'td', 'span'].includes(tag.toLowerCase())) return `<${tag}>`;
+              const styleMatch = /\bstyle\s*=\s*(["'])(.*?)\1/i.exec(attributes);
+              if (!styleMatch) return `<${tag}>`;
+              const safeStyles = styleMatch[2].split(';').map(rule => rule.trim()).filter(rule => {
+                const [property, value] = rule.split(':').map(part => part.trim().toLowerCase());
+                if (!property || !value) return false;
+                if (property === 'border') return /^1px (solid|dashed|dotted|double) #[0-9a-f]{6}$/.test(value);
+                if (property === 'color' || property === 'background-color') return /^#[0-9a-f]{6}$/.test(value) || /^rgb\(\s*(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\s*\)$/.test(value);
+                if (property === 'padding') return /^\d{1,2}px$/.test(value);
+                return tag.toLowerCase() === 'table' && ((property === 'width' && value === '100%') || (property === 'border-collapse' && value === 'collapse'));
+              }).join(';');
+              return safeStyles ? `<${tag} style="${safeStyles}">` : `<${tag}>`;
+            })
+            .replace(/<\/(p|div|span|strong|b|em|i|u|ol|ul|li|table|thead|tbody|tr|th|td|h[1-6]|blockquote|a|font)\s*>/gi, (_, tag) => tag.toLowerCase() === 'font' ? '</span>' : `</${tag}>`)
+            .replace(/<br\b[^>]*>/gi, '<br>')
+            .replace(/<br>/gi, '<br>');
+          return { title, content: safeContent, fields: safeFields };
+        });
+      }
+      out[key] = JSON.stringify(values);
+    }
   }
   return out;
 }
@@ -190,6 +264,73 @@ async function importMedicines(rows) {
     }
   });
   return medicines.length;
+}
+async function importLabs(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('rows must contain 1–1,000 lab templates');
+  const templates = rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw bad('Each lab template must be an object');
+    const amount = row.price == null || row.price === '' ? 0 : Number(typeof row.price === 'string' ? row.price.trim().replace(/[,\s]/g, '') : row.price);
+    if (!Number.isInteger(amount) || amount < 0 || amount > 2e9) throw bad(`Row ${row.rowNumber || '?'}: price must be a whole number`);
+    let fields = row.fields ?? '';
+    if (Array.isArray(fields)) fields = fields;
+    else if (typeof fields === 'string' && fields.trim()) {
+      try {
+        const parsed = JSON.parse(fields);
+        fields = Array.isArray(parsed) ? parsed : fields.split(/[|,]/);
+      } catch {
+        fields = fields.split(/[|,]/);
+      }
+    } else fields = [];
+    if (!Array.isArray(fields) || fields.length > 50) throw bad(`Row ${row.rowNumber || '?'}: fields must contain up to 50 entries`);
+    const normalizedFields = fields.map((field) => String(field ?? '').trim()).filter(Boolean);
+    const template = clean('labs', {
+      name: row.name,
+      price: amount,
+      cat: row.cat ?? '',
+      fields: JSON.stringify(normalizedFields),
+    }, false);
+    return template;
+  });
+  await tx(async (client) => {
+    for (const template of templates) {
+      await client.query('INSERT INTO labs(name,price,cat,fields) VALUES($1,$2,$3,$4)', [
+        template.name, template.price ?? 0, template.cat ?? '', template.fields ?? '[]',
+      ]);
+    }
+  });
+  return templates.length;
+}
+async function importEchoTemplates(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('rows must contain 1–1,000 echo templates');
+  const templates = rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw bad('Each echo template must be an object');
+    const amount = row.price == null || row.price === '' ? 0 : Number(typeof row.price === 'string' ? row.price.trim().replace(/[,\s]/g, '') : row.price);
+    if (!Number.isInteger(amount) || amount < 0 || amount > 2e9) throw bad(`Row ${row.rowNumber || '?'}: price must be a whole number`);
+    const parseList = (value, label) => {
+      if (Array.isArray(value)) return value;
+      if (value == null || value === '') return [];
+      try {
+        const parsed = JSON.parse(String(value));
+        if (!Array.isArray(parsed)) throw 0;
+        return parsed;
+      } catch { throw bad(`Row ${row.rowNumber || '?'}: ${label} must be a JSON list`); }
+    };
+    return clean('echo', {
+      name: row.name,
+      price: amount,
+      font: row.font || 'Moul',
+      sections: JSON.stringify(parseList(row.sections, 'sections')),
+      fields: JSON.stringify(parseList(row.fields, 'fields')),
+    }, false);
+  });
+  await tx(async (client) => {
+    for (const template of templates) {
+      await client.query('INSERT INTO echo(name,price,font,sections,fields) VALUES($1,$2,$3,$4,$5)', [
+        template.name, template.price ?? 0, template.font ?? 'Moul', template.sections ?? '[]', template.fields ?? '[]',
+      ]);
+    }
+  });
+  return templates.length;
 }
 
 const isEmail = (s) => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
@@ -487,6 +628,69 @@ async function api(req, res, url) {
       rows.push(row);
     }
     return send(res, 201, { imported: await importMedicines(rows) });
+  }
+
+  if (a === 'labs' && b === 'import-xlsx' && m === 'POST') {
+    const buffer = await readRaw(req, 1e6, 'Excel workbook is too large (max 1 MB)');
+    let workbook;
+    try { workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(buffer); }
+    catch { throw bad('Invalid Excel workbook'); }
+    const sheet = workbook.worksheets[0];
+    if (!sheet || sheet.rowCount < 2) throw bad('Excel workbook must include a header and at least one lab template');
+    if (sheet.rowCount > 1001) throw bad('Excel workbook can contain up to 1,000 lab templates');
+    const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const headers = sheet.getRow(1).values.slice(1).map(normalize);
+    const find = (...names) => headers.findIndex((header) => names.includes(header));
+    const columns = {
+      name: find('name', 'test', 'labname', 'testname'),
+      price: find('price', 'pricekhr', 'amount'),
+      cat: find('category', 'cat'),
+      fields: find('fields', 'fieldnames'),
+    };
+    if (columns.name < 0 || columns.price < 0) throw bad('Excel workbook needs name and price columns');
+    const rows = [];
+    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+      const values = sheet.getRow(rowNumber).values.slice(1);
+      if (!values.some((value) => value != null && String(value).trim())) continue;
+      const row = { rowNumber };
+      for (const [key, index] of Object.entries(columns)) {
+        if (index >= 0 && values[index] != null) row[key] = values[index];
+      }
+      rows.push(row);
+    }
+    return send(res, 201, { imported: await importLabs(rows) });
+  }
+
+  if (a === 'echo' && b === 'import-xlsx' && m === 'POST') {
+    const buffer = await readRaw(req, 1e6, 'Excel workbook is too large (max 1 MB)');
+    let workbook;
+    try { workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(buffer); }
+    catch { throw bad('Invalid Excel workbook'); }
+    const sheet = workbook.worksheets[0];
+    if (!sheet || sheet.rowCount < 2) throw bad('Excel workbook must include a header and at least one echo template');
+    if (sheet.rowCount > 1001) throw bad('Excel workbook can contain up to 1,000 echo templates');
+    const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const headers = sheet.getRow(1).values.slice(1).map(normalize);
+    const find = (...names) => headers.findIndex((header) => names.includes(header));
+    const columns = {
+      name: find('name', 'templatename', 'echoname'),
+      price: find('price', 'pricekhr', 'amount'),
+      font: find('font', 'defaultfont'),
+      sections: find('sections', 'content'),
+      fields: find('fields', 'additionalfields'),
+    };
+    if (columns.name < 0 || columns.price < 0) throw bad('Excel workbook needs name and price columns');
+    const rows = [];
+    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+      const values = sheet.getRow(rowNumber).values.slice(1);
+      if (!values.some((value) => value != null && String(value).trim())) continue;
+      const row = { rowNumber };
+      for (const [key, index] of Object.entries(columns)) {
+        if (index >= 0 && values[index] != null) row[key] = values[index];
+      }
+      rows.push(row);
+    }
+    return send(res, 201, { imported: await importEchoTemplates(rows) });
   }
 
   // generic CRUD: /api/<resource>[/<id>]

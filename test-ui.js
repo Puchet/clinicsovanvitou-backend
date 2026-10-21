@@ -158,7 +158,6 @@ server.listen(0, '127.0.0.1', async () => {
 
     const newPatientModules = [
       ['allergy', { allergen: 'Penicillin', reaction: 'Rash', severity: 'Severe', status: 'Active', date: '2026-10-14', notes: 'Avoid penicillin' }, 'Penicillin'],
-      ['vaccination', { vaccine: 'Influenza', dose: 'Annual', lot: 'LOT-88', next_due: '2027-10-14', date: '2026-10-14', notes: 'No reaction' }, 'Influenza'],
       ['referral', { referred_to: 'City Hospital', specialty: 'Cardiology', reason: 'Assessment', status: 'Pending', date: '2026-10-14', notes: 'Routine referral' }, 'City Hospital'],
       ['diagnosis_history', { diagnosis: 'Asthma', code: 'J45', status: 'Chronic', date: '2026-10-14', notes: 'Reviewed' }, 'Asthma'],
       ['laborder', { test: 'CBC', priority: 'Urgent', status: 'Requested', result: '', date: '2026-10-14', notes: 'Fasting' }, 'CBC'],
@@ -174,6 +173,29 @@ server.listen(0, '127.0.0.1', async () => {
       assert.ok(saved, ctx.__toast || `${kind} record was not saved`);
       assert.ok(run('recPanel()').includes(expected), `${kind} details should render in its patient section`);
     }
+    run("ptab='vaccination';genForm()");
+    const vaccinationHtml = els['#mf'].innerHTML;
+    for (const must of ['vaccination-form', 'Vaccine category', 'Vaccine group', 'Vaccine name', 'Dose date', 'Given', 'Administered by', 'vax_name_5']) assert.ok(vaccinationHtml.includes(must), 'vaccination form missing ' + must);
+    assert.equal((vaccinationHtml.match(/class="vax-dose-index"/g) || []).length, 6, 'vaccination form should show six dose rows');
+    els['#mf'].__m = {
+      category: 'child',
+      vaccine_group: 'Childhood series',
+      vax_name_0: 'BCG',
+      vax_date_0: '2026-10-21',
+      vax_given_0: '1',
+      vax_note_0: 'Lot BCG-19',
+      notes: 'Routine immunization',
+      date: '2026-10-21',
+      administered_by: 'Nurse Dara'
+    };
+    await run(`$('#mf').onsubmit({preventDefault(){}})`);
+    let vaccineRecord = run(`recs.find(r=>r.patient_id==${p.id}&&r.kind=='vaccination')`);
+    assert.ok(vaccineRecord, ctx.__toast || 'vaccination record should be saved');
+    let vaccineData = JSON.parse(vaccineRecord.data);
+    assert.equal(vaccineData.vaccine_group, 'Childhood series'); assert.equal(vaccineData.doses[0].vaccine, 'BCG'); assert.equal(vaccineData.doses[0].given, true); assert.equal(vaccineData.administered_by, 'Nurse Dara');
+    assert.ok(run('recPanel()').includes('BCG') && run('recPanel()').includes('Nurse Dara'), 'vaccination doses should render in the patient record');
+    run(`genForm(recs.find(r=>r.id==${vaccineRecord.id}))`);
+    assert.ok(els['#mf'].innerHTML.includes('value="Childhood series"') && /name="vax_given_0"[^>]*checked/.test(els['#mf'].innerHTML), 'editing vaccination should restore saved details');
     ok('allergy, vaccination, referral, diagnosis history, lab and imaging orders save and display records');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}');
 
@@ -371,6 +393,119 @@ server.listen(0, '127.0.0.1', async () => {
     run(`serviceForm(D.sv.indexOf(D.sv.find(x=>x.name=="Facial care")))`); assert.ok(els['#mf'].innerHTML.includes('Edit Service') && els['#mf'].innerHTML.includes('value="Facial care"') && els['#mf'].innerHTML.includes('សេវាថែរក្សាផ្ទៃមុខ') && els['#mf'].innerHTML.includes('>Save</button>'));
     els['#mf'].__m = { name: 'Facial care', price: '65000', description: 'Updated service description' };
     await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`); service = run(`D.sv.find(x=>x.name=="Facial care")`); assert.equal(service.price, 65000); assert.equal(service.description, 'Updated service description'); ok('service edits save updated price and description');
+
+    // ---- Lab Templates ----
+    run('rt="lab";q="";render()'); let labHtml = run('R.lab()');
+    for (const must of ['Lab Templates', 'Upload Lab', 'Export Excel', 'Add Type', 'Add Lab Template', 'Name', 'Price', 'Type', 'Actions']) assert.ok(labHtml.includes(must), 'Lab template list missing ' + must);
+    run(`labForm()`); let labFormHtml = els['#mf'].innerHTML;
+    for (const must of ['Add Lab Template', 'name="name"', 'name="price"', 'name="cat"', 'Fields', 'Add Field', 'labfieldadd', 'data-a="close"', 'Save']) assert.ok(labFormHtml.includes(must), 'Lab template form missing ' + must);
+    els['#mf'].__m = { name: 'Complete Blood Count', price: '12000', cat: 'Hematology', lab_field_0: 'WBC', lab_field_1: 'RBC' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    let lab = run(`D.lab.find(x=>x.name=="Complete Blood Count")`);
+    assert.ok(lab, `lab template was not saved; toast=${run('__toast')}`);
+    assert.equal(lab.price, 12000); assert.equal(lab.cat, 'Hematology'); assert.deepEqual(JSON.parse(lab.fields), ['WBC', 'RBC']);
+    labHtml = run('R.lab()');
+    assert.ok(labHtml.includes('Complete Blood Count') && labHtml.includes('KHR 12,000') && labHtml.includes('Hematology') && labHtml.includes('data-a="labedit:') && labHtml.includes('data-a="labdel:'), 'Lab list should show saved values and row actions');
+    run(`labForm(D.lab.indexOf(D.lab.find(x=>x.name=="Complete Blood Count")))`);
+    labFormHtml = els['#mf'].innerHTML;
+    assert.ok(labFormHtml.includes('Edit Lab Template') && labFormHtml.includes('value="Hematology"') && labFormHtml.includes('value="WBC"') && labFormHtml.includes('value="RBC"'), 'editing a lab template should prefill category and fields');
+    els['#mf'].__m = { name: 'Complete Blood Count', price: '15000', cat: 'Hematology', lab_field_0: 'WBC', lab_field_1: 'RBC', lab_field_2: 'Hemoglobin' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    lab = run(`D.lab.find(x=>x.name=="Complete Blood Count")`);
+    assert.equal(lab.price, 15000); assert.deepEqual(JSON.parse(lab.fields), ['WBC', 'RBC', 'Hemoglobin']);
+    const savedModal = run('modal'); run('modal=(...args)=>{__labModal=args}'); run('labCategoryForm()');
+    assert.equal(run('__labModal[0]'), 'Add Type'); assert.equal(run('__labModal[1][0][0]'), 'Type');
+    await run(`__labModal[3]({name:'Hematology'})`); await run('load()');
+    assert.ok(run(`D.labcategories.some(x=>x.name=="Hematology")`), 'Lab categories should persist through the API');
+    await assert.rejects(run(`__labModal[3]({name:'hematology'})`), /Type already exists/);
+    ctx.__savedModal = savedModal; run('modal=__savedModal');
+    run(`q="blood";labHtml=R.lab()`); assert.ok(run('labHtml').includes('Complete Blood Count'));
+    run(`q="not found";labHtml=R.lab()`); assert.ok(!run('labHtml').includes('Complete Blood Count'));
+    run('q=""');
+    run(`$('#lab-import-file')`); const labPicker = els['#lab-import-file']; let labPickerOpened = false; labPicker.click = () => { labPickerOpened = true; };
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'labimport' } }) }, preventDefault() {} });
+    assert.ok(labPickerOpened, 'Lab Upload action should open the workbook picker');
+    const labWorkbook = new ExcelJS.Workbook(), labSheet = labWorkbook.addWorksheet('Labs');
+    labSheet.addRow(['Test name', 'Price (KHR)', 'Category', 'Fields']); labSheet.addRow(['Imported CBC', 8000, 'Hematology', '["Platelets","Hematocrit"]']);
+    const labImportBytes = Buffer.from(await labWorkbook.xlsx.writeBuffer());
+    const labFile = { name: 'labs.xlsx', size: labImportBytes.length, arrayBuffer: async () => labImportBytes.buffer.slice(labImportBytes.byteOffset, labImportBytes.byteOffset + labImportBytes.byteLength) };
+    ctx.__labFile = labFile; await run('importLabsFile(__labFile)');
+    const importedLab = run(`D.lab.find(x=>x.name=="Imported CBC")`);
+    assert.ok(importedLab && importedLab.price == 8000 && importedLab.cat == 'Hematology'); assert.deepEqual(JSON.parse(importedLab.fields), ['Platelets', 'Hematocrit']);
+    ok('Lab templates support searchable table, add/edit fields, categories, and Excel import');
+
+    // ---- Echo Templates ----
+    run('rt="echo";q="";render()'); let echoHtml = run('R.echo()');
+    for (const must of ['Echo Templates', 'Create Template', 'Upload', 'Download', 'echo-template-grid']) assert.ok(echoHtml.includes(must), 'Echo templates page missing ' + must);
+    run('echoForm()'); let echoFormHtml = els['#mf'].innerHTML;
+    for (const must of ['Create Echo Template', 'Template Name', 'Default Font', 'Section Content (Title/Body)', 'contenteditable="true"', 'Insert Table', 'Additional Fields (Optional)', 'Field Name', 'Add Field', 'Add New Section', 'Save Template', 'data-echo-color="foreColor"', 'data-echo-color="hiliteColor"', 'data-a="echoformat:0:createLink"', 'data-a="echoformat:0:insertImage"', '<svg viewBox="0 0 24 24"']) assert.ok(echoFormHtml.includes(must), 'Echo template editor missing ' + must);
+    let echoTableDialogHtml = '';
+    els['#md'].insertAdjacentHTML = (_, html) => { echoTableDialogHtml = html; };
+    run(`echoFormat('0','insertTable')`);
+    for (const must of ['echo-table-dialog', 'echo-table-rows', 'value="2"', 'echo-table-columns', 'echo-table-header-color', 'echo-table-header-hex', 'echo-table-border-color', 'echo-table-border-hex', 'echo-table-border-style', 'Dashed', 'Dotted', 'Double', 'echotableinsert']) assert.ok(echoTableDialogHtml.includes(must), 'Echo Insert Table dialog missing ' + must);
+    for (const selector of ['#echo-table-rows', '#echo-table-columns', '#echo-table-header-hex', '#echo-table-border-hex', '#echo-table-border-style']) run(`$('${selector}')`);
+    els['#echo-table-rows'].value = '3'; els['#echo-table-columns'].value = '4'; els['#echo-table-header-hex'].value = '#ffffcc'; els['#echo-table-border-hex'].value = '#123456'; els['#echo-table-border-style'].value = 'dotted';
+    let insertedEchoTable = '';
+    ctx.document.execCommand = (command, _, html) => { if (command === 'insertHTML') insertedEchoTable = html; };
+    run('echoTableInsert()');
+    assert.equal((insertedEchoTable.match(/<tr>/g)||[]).length,3); assert.equal((insertedEchoTable.match(/<th /g)||[]).length,4); assert.equal((insertedEchoTable.match(/<td /g)||[]).length,8);
+    assert.ok(insertedEchoTable.includes('background-color:#ffffcc') && insertedEchoTable.includes('border:1px dotted #123456'));
+    delete ctx.document.execCommand;
+    els['#mf'].__m = { name: 'Abdominal Ultrasound', price: '25000', font: 'Moul', echo_title_0: 'Findings', echo_content_0: '<p onclick="alert(1)">Liver normal <strong>size</strong> <font color="#ff0000">abnormal</font> <span style="background-color:#ffff00">highlight</span> <a href="https://example.test/report" onclick="alert(1)">report</a> <a href="javascript:alert(1)">bad link</a> <img src="https://example.test/image.jpg" onerror="alert(1)"></p><table style="width:100%;border-collapse:collapse;border:1px dotted #123456"><tbody><tr><th style="border:1px dotted #123456;padding:6px;background-color:#ffffcc" onmouseover="alert(1)">Header</th><td style="border:1px dotted #123456;padding:6px">Value</td></tr></tbody></table><script>alert(2)</script>', echo_field_0_0: 'Patient ID', echo_field_0_1: 'Exam date' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    let echoTemplate = run(`D.echo.find(x=>x.name=="Abdominal Ultrasound")`);
+    assert.ok(echoTemplate, `echo template was not saved; toast=${run('__toast')}`);
+    assert.equal(echoTemplate.price, 25000); assert.equal(echoTemplate.font, 'Moul');
+    let echoSections = JSON.parse(echoTemplate.sections);
+    assert.equal(echoSections[0].title, 'Findings'); assert.deepEqual(echoSections[0].fields, ['Patient ID', 'Exam date']);
+    assert.ok(echoSections[0].content.startsWith('<p>Liver normal <strong>size</strong> <span style="color:#ff0000">abnormal</span>'), 'saved rich text should preserve formatted text colors');
+    assert.ok(echoSections[0].content.includes('<table style="width:100%;border-collapse:collapse;border:1px dotted #123456">'), 'saved rich text should preserve safe table styling');
+    assert.ok(echoSections[0].content.includes('background-color:#ffffcc') && !echoSections[0].content.includes('onmouseover') && !echoSections[0].content.includes('<script'), 'table styles should remain while unsafe attributes and scripts are removed');
+    assert.ok(echoSections[0].content.includes('<span style="color:#ff0000">abnormal</span>') && echoSections[0].content.includes('background-color:#ffff00'), 'text and highlight colors should persist');
+    assert.ok(echoSections[0].content.includes('<a href="https://example.test/report"') && echoSections[0].content.includes('<img src="https://example.test/image.jpg"') && !echoSections[0].content.includes('javascript:'), 'safe links and images should persist without event handlers or unsafe URLs');
+    echoHtml = run('R.echo()');
+    assert.ok(echoHtml.includes('Abdominal Ultrasound') && echoHtml.includes('Font: Moul') && echoHtml.includes('echo-template-price') && echoHtml.includes('data-a="echoedit:') && echoHtml.includes('data-a="echodel:'), 'Echo template cards should show price, font, and edit/delete controls');
+    run(`echoForm(D.echo.indexOf(D.echo.find(x=>x.name=="Abdominal Ultrasound")))`);
+    echoFormHtml = els['#mf'].innerHTML;
+    assert.ok(echoFormHtml.includes('Edit Echo Template') && echoFormHtml.includes('value="Findings"') && echoFormHtml.includes('Liver normal <strong>size</strong>') && echoFormHtml.includes('value="Patient ID"') && echoFormHtml.includes('value="Exam date"'), 'editing an Echo template should restore rich content and additional fields');
+    els['#mf'].__m = { name: 'Abdominal Ultrasound', price: '30000', font: 'Koulen', echo_title_0: 'Impression', echo_content_0: '<p>Updated report</p>', echo_field_0_0: 'Patient ID', echo_field_0_1: 'Exam date' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    echoTemplate = run(`D.echo.find(x=>x.name=="Abdominal Ultrasound")`);
+    assert.equal(echoTemplate.price, 30000); assert.equal(echoTemplate.font, 'Koulen');
+    assert.equal(JSON.parse(echoTemplate.sections)[0].content, '<p>Updated report</p>');
+    run('echoForm()'); els['#mf'].__m = { name: 'Blank Echo', price: '0', font: 'Moul', echo_title_0: '', echo_content_0: '', echo_field_0_0: '' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    assert.equal(JSON.parse(run(`D.echo.find(x=>x.name=="Blank Echo").sections`)).length, 1, 'a new template should be allowed to save with an empty editor section');
+    run('echoForm()'); els['#mf'].__m = { name: 'Long Report Template', price: '0', font: 'Moul', echo_title_0: 'Section One', echo_content_0: 'A'.repeat(5000), echo_field_0_0: '', echo_title_1: 'Section Two', echo_content_1: 'B'.repeat(5000), echo_field_1_0: '', echo_title_2: 'Section Three', echo_content_2: 'C'.repeat(5000), echo_field_2_0: '' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    const longEcho = run(`D.echo.find(x=>x.name=="Long Report Template")`);
+    assert.ok(longEcho, `Echo sections over the old 10,000-character limit should save; toast=${run('__toast')}`);
+    assert.equal(JSON.parse(longEcho.sections).reduce((length,section)=>length+section.content.length,0), 15000);
+    run('echoForm()'); els['#mf'].__m = { name: 'Long Single Section', price: '0', font: 'Moul', echo_title_0: 'Full report', echo_content_0: 'R'.repeat(12000), echo_field_0_0: '' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    const longSectionEcho = run(`D.echo.find(x=>x.name=="Long Single Section")`);
+    assert.ok(longSectionEcho, `a single Echo section over 9,000 characters should save; toast=${run('__toast')}`);
+    assert.equal(JSON.parse(longSectionEcho.sections)[0].content.length, 12000);
+    run('q="ultrasound";echoHtml=R.echo()'); assert.ok(run('echoHtml').includes('Abdominal Ultrasound'));
+    run('q="missing";echoHtml=R.echo()'); assert.ok(!run('echoHtml').includes('Abdominal Ultrasound'));
+    run('q=""');
+    run(`$('#echo-import-file')`); const echoPicker = els['#echo-import-file']; let echoPickerOpened = false; echoPicker.click = () => { echoPickerOpened = true; };
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'echoimport' } }) }, preventDefault() {} });
+    assert.ok(echoPickerOpened, 'Echo Upload action should open the workbook picker');
+    const echoWorkbook = new ExcelJS.Workbook(), echoSheet = echoWorkbook.addWorksheet('Echo');
+    echoSheet.addRow(['Template Name', 'Price (KHR)', 'Default Font', 'Sections', 'Additional Fields']);
+    echoSheet.addRow(['Imported Echo', 18000, 'Moul', JSON.stringify([{ title: 'Result', content: '<p>Report</p>', fields: ['Comment'] }]), '["Comment"]']);
+    const echoImportBytes = Buffer.from(await echoWorkbook.xlsx.writeBuffer());
+    const echoFile = { name: 'echo.xlsx', size: echoImportBytes.length, arrayBuffer: async () => echoImportBytes.buffer.slice(echoImportBytes.byteOffset, echoImportBytes.byteOffset + echoImportBytes.byteLength) };
+    ctx.__echoFile = echoFile; await run('importEchoFile(__echoFile)');
+    const importedEcho = run(`D.echo.find(x=>x.name=="Imported Echo")`);
+    assert.ok(importedEcho && importedEcho.price == 18000); assert.equal(JSON.parse(importedEcho.sections)[0].fields[0], 'Comment');
+    await run('exportEchoTemplates()');
+    assert.equal(downloads[downloads.length - 1].download, 'echo-templates.xlsx');
+    const echoExportBook = new ExcelJS.Workbook(); await echoExportBook.xlsx.load(Buffer.from(await downloads.blob.arrayBuffer()));
+    assert.equal(echoExportBook.worksheets[0].getRow(1).getCell(1).value, 'name');
+    assert.equal(echoExportBook.worksheets[0].getRow(2).getCell(1).value, 'Abdominal Ultrasound');
+    ok('Echo templates support sections, rich formatting, additional fields, and Excel upload/download');
 
     // ---- Consultation Form (CNF) ----
     run('cnfForm()'); for (const must of ['General Form', 'Assessment &amp; Plan', 'Form History', '1. Problems &amp; Concerns', 'Acne scars', '2. Skin type', '3. History of reactions', 'Product usage history', 'Medicine usage', 'Treatment history', 'Personal &amp; family history', 'Lifestyle', 'For women', 'Treatment Agreement', 'Acceptance &amp; Results', 'Guarantee of Care', 'Privacy Notice', 'Photo Consent', 'Responsibility', 'Other Notices', 'Payment Policy', 'Customer understanding', 'Warnings &amp; conditions', 'Personal interview', 'Customer name', 'Test Patient', 'No history records yet', 'Occupation', 'Address override', 'Personal Interview', 'Doctor’s Assessment', 'Doctor’s Treatment Plan', 'Special Notes - Image 5', 'Have you visited our clinic before?', 'TikTok', 'Telegram', 'Facebook', 'Current address', 'Additional notes']) assert.ok(ctx.__body.replace(/&amp;/g, '&amp;').includes(must) || ctx.__body.includes(must.replace('&amp;', '&')), 'CNF form missing ' + must);
