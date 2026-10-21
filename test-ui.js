@@ -28,6 +28,7 @@ server.listen(0, '127.0.0.1', async () => {
   vm.runInContext(fs.readFileSync(path.join(frontendDir, 'patient.js'), 'utf8'), ctx);
   const run = (code) => vm.runInContext(code, ctx);
   ctx.__nativeOpenForm = run('openForm');
+  ctx.__nativePrintDoc = run('printDoc');
   try {
     await (await fetch(base + '/api/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     run(`tok=null`); const lg = await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
@@ -193,6 +194,46 @@ server.listen(0, '127.0.0.1', async () => {
     ok('paid billing history can print payment receipts; payment actions are disabled when no balance remains');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
 
+    // ---- Medicines list and Add Medicine form ----
+    run('rt="med";q="";medicineFormOpen=true;medicineEditIndex=null;render()'); let medicineHtml = run('R.med()');
+    for (const must of ['Medicine Image', 'Drug name', 'Composition', 'In Stock', 'Sales unit', 'Unit name', 'Price (KHR)', 'Qty per unit', 'Expiration date', 'Notification date', 'medunitadd', 'Add']) assert.ok(medicineHtml.includes(must), 'medicine form missing ' + must);
+    assert.ok(medicineHtml.includes('data-a="medimport"') && medicineHtml.includes('id="med-import-file"'), 'medicine page should offer Excel import');
+    const medicineUnitInput = (value) => ({ value, });
+    const medicineRow = { querySelector: (selector) => selector == '.unit-name' ? medicineUnitInput('Tablet') : selector == '.unit-price' ? medicineUnitInput('5000') : medicineUnitInput('1') };
+    ctx.__medForm = { __m: { name: 'Amoxicillin', composition: '500mg capsule', stock: '30', photo: '', expiration_date: '2027-06-30', notification_date: '2027-05-30' }, querySelectorAll: () => [medicineRow] };
+    ctx.__medEvent = { preventDefault() {}, target: ctx.__medForm };
+    await run('medicineSave(__medEvent)');
+    let medicine = run(`D.med.find(x=>x.name=="Amoxicillin")`);
+    assert.ok(medicine && medicine.composition == '500mg capsule' && medicine.stock == 30);
+    assert.deepEqual(JSON.parse(medicine.units), [{ name: 'Tablet', price: 5000, qty: 1 }]);
+    const medicineIndex = run('D.med.indexOf(D.med.find(x=>x.name=="Amoxicillin"))');
+    medicineHtml = run('R.med()');
+    for (const action of ['medstock', 'medcomposition', 'medqr', 'medbarcode']) assert.ok(medicineHtml.includes(`data-a="${action}:${medicineIndex}"`), 'medicine row missing ' + action + ' action');
+    assert.ok(medicineHtml.includes('500mg capsule') && medicineHtml.includes('Tablet:') && medicineHtml.includes('2027-06-30') && medicineHtml.includes(`data-a="mededit:${medicineIndex}"`));
+    run(`viewMedicineComposition(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('500mg capsule') && !els['#mf'].innerHTML.includes('<textarea'));
+    run(`updateMedicineStock(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('Update Stock') && els['#mf'].innerHTML.includes('value="30"'));
+    els['#mf'].__m = { stock: '42' }; await run(`$('#mf').onsubmit({preventDefault(){},target:$('#mf')})`);
+    assert.equal(run(`D.med.find(x=>x.name=="Amoxicillin").stock`), 42, ctx.__toast);
+    run('printDoc=function(t,h){__printed=[t,h]}');
+    await run(`printMedicineCode(${medicineIndex},'qr')`);
+    assert.equal(ctx.__printed[0], 'Medicine QR Code'); assert.ok(ctx.__printed[1].includes('Amoxicillin') && ctx.__printed[1].includes('<svg'));
+    await run(`printMedicineCode(${medicineIndex},'barcode')`);
+    assert.equal(ctx.__printed[0], 'Medicine Barcode'); assert.ok(ctx.__printed[1].includes('Amoxicillin') && ctx.__printed[1].includes('<svg'));
+    run('printDoc=__nativePrintDoc');
+    ok('medicine stock, composition, QR, and barcode actions are available from the row');
+    run(`medicineEditIndex=D.med.indexOf(D.med.find(x=>x.name=="Amoxicillin"));medicineFormOpen=true;render()`); medicineHtml = run('R.med()');
+    assert.ok(medicineHtml.includes('value="Amoxicillin"') && medicineHtml.includes('value="500mg capsule"') && medicineHtml.includes('value="Tablet"'));
+    ok('Medicines list and Add/Edit form support image, composition, stock, multiple sales units, and dates');
+    run(`medicineFormOpen=false;medicineEditIndex=null;render();$('#med-import-file')`); let medicinePickerOpened = false; els['#med-import-file'].click = () => { medicinePickerOpened = true; };
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medimport' } }) }, preventDefault() {} }); assert.ok(medicinePickerOpened);
+    const medicineWorkbookForImport = new ExcelJS.Workbook(), medicineImportSheet = medicineWorkbookForImport.addWorksheet('Medicines');
+    medicineImportSheet.addRow(['Drug name', 'Composition', 'In Stock', 'Price (KHR)']); medicineImportSheet.addRow(['Imported UI medicine', '100mg', 18, 1500]);
+    const uiMedicineImportBytes = Buffer.from(await medicineWorkbookForImport.xlsx.writeBuffer());
+    const medicineFile = { name: 'medicines.xlsx', size: uiMedicineImportBytes.length, arrayBuffer: async () => uiMedicineImportBytes.buffer.slice(uiMedicineImportBytes.byteOffset, uiMedicineImportBytes.byteOffset + uiMedicineImportBytes.byteLength) };
+    await listeners.change.find(fn => fn.toString().includes('med-import-file'))({ target: { id: 'med-import-file', files: [medicineFile], value: 'medicines.xlsx' } });
+    const importedUiMedicine = run(`D.med.find(m=>m.name=="Imported UI medicine")`);
+    assert.ok(importedUiMedicine && importedUiMedicine.composition == '100mg' && importedUiMedicine.stock == 18); ok('medicine Excel import button saves spreadsheet rows');
+
     // ---- Services cards and Add / Edit form ----
     run('rt="sv";q="";render()'); let serviceHtml = run('R.sv()');
     assert.ok(serviceHtml.includes('data-a="svimport"') && serviceHtml.includes('id="sv-import-file"') && serviceHtml.includes('accept=".csv,.xlsx'), 'Services screen should expose Excel and CSV import');
@@ -256,7 +297,11 @@ server.listen(0, '127.0.0.1', async () => {
     const descCol = exportedHeaders.indexOf('description') + 1, exportedServiceRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(1).value == 'Facial care');
     assert.ok(exportedServiceRow && exportedServiceRow.getCell(descCol).value == 'Updated service description'); ok('Excel export downloads a real .xlsx workbook with the service Description column');
     run('rt="med"'); await run('exportExcel()'); exportedBook = new ExcelJS.Workbook(); await exportedBook.xlsx.load(Buffer.from(downloads.blob.p[0]));
-    exportedSheet = exportedBook.worksheets[0]; const formulaRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(1).value == "'=SUM(1,1)");
+    exportedSheet = exportedBook.worksheets[0]; exportedHeaders = exportedSheet.getRow(1).values.slice(1);
+    assert.deepEqual(exportedHeaders, ['id', 'name', 'type', 'price', 'stock', 'sold', 'damaged', 'last_stock_date', 'last_stock', 'expiry_date', 'reminder_date', 'units', 'image_url', 'composition']);
+    const exportedMedicineRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(2).value == 'Amoxicillin');
+    assert.ok(exportedMedicineRow); assert.equal(exportedMedicineRow.getCell(10).value, '2027-06-30'); assert.equal(exportedMedicineRow.getCell(11).value, '2027-05-30'); assert.equal(exportedMedicineRow.getCell(14).value, '500mg capsule');
+    const formulaRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(2).value == "'=SUM(1,1)");
     assert.ok(formulaRow); ok('Excel cells that start with formula characters are neutralised');
     const realFetch = ctx.fetch;
     ctx.fetch = async () => ({ status: 404, ok: false, json: async () => ({ error: 'Not found' }) });

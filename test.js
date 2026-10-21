@@ -72,6 +72,45 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('GET', '/api/services?q=Exported')).body[0].description, 'Description included'); ok('real Excel export includes service descriptions and imports back into Services');
 
     const med = (await call('POST', '/api/medicines', { name: 'Paracetamol', price: 500, stock: 10 })).body;
+    const detailedMedicine = await call('POST', '/api/medicines', {
+      name: 'Paracetamol 500mg', composition: 'Paracetamol 500mg', stock: 100,
+      units: JSON.stringify([{ name: 'Tablet', price: 1000, qty: 1 }, { name: 'Box', price: 9000, qty: 10 }]),
+      price: 1000, expiration_date: '2027-06-30', notification_date: '2027-05-30',
+    });
+    assert.equal(detailedMedicine.status, 201);
+    assert.equal(detailedMedicine.body.composition, 'Paracetamol 500mg');
+    assert.deepEqual(JSON.parse(detailedMedicine.body.units), [{ name: 'Tablet', price: 1000, qty: 1 }, { name: 'Box', price: 9000, qty: 10 }]);
+    assert.equal(detailedMedicine.body.expiration_date, '2027-06-30');
+    const qrCode = await call('GET', `/api/medicines/${detailedMedicine.body.id}/code/qr`);
+    const barCode = await call('GET', `/api/medicines/${detailedMedicine.body.id}/code/barcode`);
+    assert.equal(qrCode.status, 200); assert.match(qrCode.body.svg, /^<svg/);
+    assert.equal(barCode.status, 200); assert.match(barCode.body.svg, /^<svg/); ok('medicine QR and Code 128 barcode labels generate as SVG');
+    assert.equal((await call('GET', '/api/medicines?q=500mg')).body[0].id, detailedMedicine.body.id);
+    assert.equal((await call('POST', '/api/medicines', { name: 'Bad date', expiration_date: '2026-99-99' })).status, 400);
+    assert.equal((await call('POST', '/api/medicines', { name: 'Bad unit', units: JSON.stringify([{ name: '', price: 500, qty: 1 }]) })).status, 400); ok('medicine details, multiple sales units, expiry dates, and validation persist');
+    const medicineWorkbook = new ExcelJS.Workbook(), medicineSheet = medicineWorkbook.addWorksheet('Medicines');
+    medicineSheet.addRow(['Drug name', 'Composition', 'In Stock', 'Units', 'Expiry date', 'Reminder date']);
+    medicineSheet.addRow(['Imported medicine', '250mg', 40, JSON.stringify([{ name: 'Capsule', price: 'KHR 3,000', qty: 1 }]), new Date('2027-08-01T00:00:00Z'), new Date('2027-07-01T00:00:00Z')]);
+    const medicineWorkbookBytes = Buffer.from(await medicineWorkbook.xlsx.writeBuffer());
+    const medicineImport = await fetch(base + '/api/medicines/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Authorization: 'Bearer ' + token },
+      body: medicineWorkbookBytes,
+    });
+    assert.equal(medicineImport.status, 201); assert.equal((await medicineImport.json()).imported, 1);
+    const importedMedicine = (await call('GET', '/api/medicines?q=Imported medicine')).body[0];
+    assert.equal(importedMedicine.composition, '250mg'); assert.equal(importedMedicine.stock, 40); assert.equal(importedMedicine.price, 3000);
+    assert.deepEqual(JSON.parse(importedMedicine.units), [{ name: 'Capsule', price: 3000, qty: 1 }]); ok('medicines can be imported from Excel workbooks');
+    const invalidMedicineBook = new ExcelJS.Workbook(), invalidMedicineSheet = invalidMedicineBook.addWorksheet('Medicines');
+    invalidMedicineSheet.addRow(['Name', 'Price']); invalidMedicineSheet.addRow(['Broken price', 'not a number']);
+    const invalidMedicineResponse = await fetch(base + '/api/medicines/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Authorization: 'Bearer ' + token },
+      body: Buffer.from(await invalidMedicineBook.xlsx.writeBuffer()),
+    });
+    assert.equal(invalidMedicineResponse.status, 400);
+    assert.match((await invalidMedicineResponse.json()).error, /Row 2: Price must be a whole KHR amount/);
+    assert.equal((await call('GET', '/api/medicines?q=Broken price')).body.length, 0); ok('invalid medicine prices report their Excel row and leave imports unchanged');
     let s = await call('POST', '/api/sales', { method: 'Cash', items: [{ medicine_id: med.id, qty: 4 }] });
     assert.equal(s.status, 201); assert.equal(s.body.total, 2000); ok('sale uses DB price and totals correctly');
     assert.equal((await call('GET', `/api/medicines/${med.id}`)).body.stock, 6); ok('stock decremented');

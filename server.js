@@ -4,6 +4,8 @@ const fs = require('fs');
 const http = require('http');
 const crypto = require('crypto');
 const ExcelJS = require('exceljs');
+const QRCode = require('qrcode');
+const bwipjs = require('bwip-js');
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env file */ }
 const { initDb, close, query, queryOne, queryAll, tx, RES, CLINIC, dataDir } = require('./db');
 const { hashPw, checkPw, sign, verify, initAuth } = require('./auth');
@@ -95,6 +97,28 @@ function clean(name, body, partial, spec = RES[name]) {
     if ('age' in out && out.age > 150) throw bad('age is not valid');
     if ('age_unit' in out && !['', 'Y', 'M', 'D'].includes(out.age_unit)) throw bad('age_unit must be Y, M or D');
   }
+  if (name === 'medicines') {
+    for (const key of ['expiration_date', 'notification_date']) {
+      if (key in out && out[key]) {
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(out[key]) ? new Date(out[key] + 'T00:00:00Z') : null;
+        if (!date || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== out[key]) throw bad(`${key} must be a valid date`);
+      }
+    }
+    if ('units' in out) {
+      let units;
+      try { units = JSON.parse(out.units || '[]'); } catch { throw bad('units must be a valid list'); }
+      if (!Array.isArray(units) || units.length > 20) throw bad('units must contain up to 20 sales units');
+      units = units.map((unit) => {
+        if (!unit || typeof unit !== 'object' || Array.isArray(unit)) throw bad('Each sales unit must be an object');
+        const unitName = String(unit.name || '').trim(), price = Number(unit.price), qty = Number(unit.qty);
+        if (!unitName || unitName.length > 60) throw bad('Sales unit name is required (max 60 characters)');
+        if (!Number.isInteger(price) || price < 0 || price > 2e9) throw bad('Sales unit price must be a whole number');
+        if (!Number.isInteger(qty) || qty < 1 || qty > 2e9) throw bad('Sales unit quantity must be a positive whole number');
+        return { name: unitName, price, qty };
+      });
+      out.units = JSON.stringify(units);
+    }
+  }
   if (name === 'records') {
     if ('kind' in out && !KINDS.includes(out.kind)) throw bad('kind is not valid');
     if ('color' in out && out.color && !/^#[0-9a-fA-F]{6}$/.test(out.color)) throw bad('color is not valid');
@@ -116,6 +140,53 @@ async function importServices(rows) {
   });
   return services.length;
 }
+async function importMedicines(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('rows must contain 1–1,000 medicines');
+  const money = (value, label) => {
+    if (value == null || value === '') return 0;
+    const normalized = typeof value === 'string' ? value.trim().replace(/(?:KHR|៛|RIEL)/gi, '').replace(/[,\s$]/g, '') : value;
+    const amount = Number(normalized);
+    if (!Number.isInteger(amount) || amount < 0 || amount > 2e9) throw bad(`${label} must be a whole KHR amount between 0 and 2,000,000,000`);
+    return amount;
+  };
+  const dateValue = (value) => {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 2958465) return new Date(Date.UTC(1899, 11, 30) + value * 86400000).toISOString().slice(0, 10);
+    return value;
+  };
+  const medicines = rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw bad('Each medicine must be an object');
+    try {
+      let units, firstUnit;
+      if (row.units) {
+        try { units = JSON.parse(row.units); } catch { throw bad('units must be a valid list'); }
+        if (!Array.isArray(units)) throw bad('units must be a valid list');
+        units = units.map((unit) => ({ ...unit, price: money(unit.price, 'Sales unit price') }));
+        firstUnit = units[0];
+      }
+      const price = row.price == null || row.price === '' ? firstUnit?.price ?? 0 : money(row.price, 'Price');
+      return clean('medicines', {
+        stock: 0, ...row, price,
+        units: units ? JSON.stringify(units) : row.units,
+        expiration_date: dateValue(row.expiration_date),
+        notification_date: dateValue(row.notification_date),
+      }, false);
+    } catch (error) {
+      if (error instanceof HttpError) throw bad(`Row ${row.rowNumber || '?'}: ${error.message}`);
+      throw error;
+    }
+  });
+  await tx(async (client) => {
+    for (const medicine of medicines) {
+      await client.query(`INSERT INTO medicines(name,composition,price,stock,photo,units,expiration_date,notification_date)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [
+        medicine.name, medicine.composition ?? '', medicine.price ?? 0, medicine.stock ?? 0,
+        medicine.photo ?? '', medicine.units ?? '', medicine.expiration_date ?? '', medicine.notification_date ?? '',
+      ]);
+    }
+  });
+  return medicines.length;
+}
 
 const isEmail = (s) => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const userCount = async () => Number((await queryOne('SELECT COUNT(*)::int n FROM users'))?.n || 0);
@@ -135,7 +206,7 @@ const DUMMY = '00000000000000000000000000000000:' + '00'.repeat(64);
 // ---------- API ----------
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // after "api"
-  const [a, b, c] = parts, m = req.method;
+  const [a, b, c, d] = parts, m = req.method;
   const ip = req.socket.remoteAddress;
 
   if (a === 'health') return send(res, 200, { ok: true });
@@ -178,6 +249,17 @@ async function api(req, res, url) {
     await query('UPDATE users SET pass=$1 WHERE id=$2', [await hashPw(String(body.password)), user.id]);
     fails.delete(key);
     return send(res, 200, { ok: true });
+  }
+
+  if (a === 'medicines' && c === 'code' && ['qr', 'barcode'].includes(d) && m === 'GET') {
+    const id = Number(b);
+    if (!Number.isInteger(id) || id < 1) throw new HttpError(404, 'Not found');
+    const medicine = await queryOne('SELECT id,name,composition FROM medicines WHERE id=$1', [id]);
+    if (!medicine) throw new HttpError(404, 'Medicine not found');
+    const svg = d === 'qr'
+      ? await QRCode.toString(JSON.stringify({ id: medicine.id, name: medicine.name, composition: medicine.composition }), { type: 'svg', errorCorrectionLevel: 'M', margin: 2, width: 256 })
+      : bwipjs.toSVG({ bcid: 'code128', text: String(medicine.id), scale: 3, height: 15, includetext: true, textxalign: 'center' });
+    return send(res, 200, { svg });
   }
 
   if (a === 'export' && b === 'xlsx' && m === 'POST') {
@@ -335,6 +417,41 @@ async function api(req, res, url) {
       });
     }
     return send(res, 201, { imported: await importServices(rows) });
+  }
+
+  if (a === 'medicines' && b === 'import-xlsx' && m === 'POST') {
+    const buffer = await readRaw(req, 1e6, 'Excel workbook is too large (max 1 MB)');
+    let workbook;
+    try { workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(buffer); }
+    catch { throw bad('Invalid Excel workbook'); }
+    const sheet = workbook.worksheets[0];
+    if (!sheet || sheet.rowCount < 2) throw bad('Excel workbook must include a header and at least one medicine');
+    if (sheet.rowCount > 1001) throw bad('Excel workbook can contain up to 1,000 medicines');
+    const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const headers = sheet.getRow(1).values.slice(1).map(normalize);
+    const find = (...names) => headers.findIndex((header) => names.includes(header));
+    const columns = {
+      name: find('name', 'drugname', 'medicine', 'medicinename'),
+      composition: find('composition', 'strength'),
+      price: find('price', 'pricekhr', 'unitprice'),
+      stock: find('stock', 'instock', 'quantity', 'qty'),
+      units: find('units', 'salesunits'),
+      expiration_date: find('expirationdate', 'expirydate', 'expiry'),
+      notification_date: find('notificationdate', 'notifydate', 'reminderdate'),
+    };
+    if (columns.name < 0) throw bad('Excel workbook needs a medicine name column');
+    const rows = [];
+    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+      const values = sheet.getRow(rowNumber).values.slice(1);
+      if (!values.some((value) => value != null && String(value).trim())) continue;
+      const row = { rowNumber };
+      for (const [key, index] of Object.entries(columns)) {
+        if (index < 0 || values[index] == null) continue;
+        row[key] = key == 'units' && typeof values[index] != 'string' ? JSON.stringify(values[index]) : values[index];
+      }
+      rows.push(row);
+    }
+    return send(res, 201, { imported: await importMedicines(rows) });
   }
 
   // generic CRUD: /api/<resource>[/<id>]
