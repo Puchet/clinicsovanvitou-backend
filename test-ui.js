@@ -13,10 +13,11 @@ server.listen(0, '127.0.0.1', async () => {
   const ok = (n) => console.log('  ✓', n);
   const el = () => new Proxy({ dataset: { mode: 'manual' }, classList: { add() {}, remove() {}, toggle() {} }, style: {}, value: '', hidden: false, innerHTML: '', textContent: '', insertAdjacentHTML() {}, querySelector: () => el(), querySelectorAll: () => [] }, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; } });
   const els = {}; const downloads = []; const listeners = {};
+  const sessionValues = {};
   const ctx = vm.createContext({
     console, URL, setTimeout, clearTimeout, Promise, Intl, Date,
     document: { querySelector: (s) => (els[s] = els[s] || el()), querySelectorAll: () => [], addEventListener: (type, fn) => (listeners[type] = [...(listeners[type] || []), fn]), createElement: () => ({ click() { downloads.push(this); }, style: {} }), createTreeWalker: () => ({ nextNode: () => false }), body: { querySelectorAll: () => [] }, documentElement: { dataset: {}, lang: 'en' } },
-    window: { print() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, MutationObserver: class { observe() {} }, NodeFilter: { SHOW_TEXT: 4 },
+    window: { print() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, sessionStorage: { getItem: (key) => sessionValues[key] || null, setItem: (key, value) => { sessionValues[key] = String(value); }, removeItem: (key) => { delete sessionValues[key]; } }, MutationObserver: class { observe() {} }, NodeFilter: { SHOW_TEXT: 4 },
     matchMedia: () => ({ matches: false }), requestAnimationFrame: (f) => f(), confirm: () => true,
     fetch: (u, o) => fetch(base + u, o),
     FormData: class { constructor(f) { this.m = (f && f.__m) || {}; } get(k) { return this.m[k] ?? null; } getAll(k) { return [].concat(this.m[k] ?? []); } [Symbol.iterator]() { return Object.entries(this.m)[Symbol.iterator](); } },
@@ -33,6 +34,22 @@ server.listen(0, '127.0.0.1', async () => {
     await (await fetch(base + '/api/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     run(`tok=null`); const lg = await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     ctx.__t = lg.token; run('tok=__t; toast=function(m){__toast=m}'); await run('load()'); ok('app loads data from the API');
+    for (const page of ['ap', 'ipd', 'cur', 'med', 'set']) {
+      listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'go:' + page } }) }, preventDefault() {} });
+      assert.equal(sessionValues.currentPage, page);
+      run(`rt='dash';restorePage()`);
+      assert.equal(run('rt'), page);
+    }
+    run(`rt='dash';pAct('dashap')`);
+    assert.equal(sessionValues.currentPage, 'ap', 'dashboard appointment shortcut should persist the appointments page');
+    for (const page of ['ap', 'ipd', 'cur']) {
+      sessionValues.currentPage = page;
+      run(`rt='dash';restorePage()`);
+      assert.equal(run('rt'), page, `${page} must be accepted as a valid saved route despite using the generic table renderer`);
+    }
+    run(`cal.mode='month';rt='dash'`);
+    sessionValues.currentPage = 'unknown'; run(`rt='dash';restorePage()`); assert.equal(run('rt'), 'dash');
+    ok('refresh restores Appointments, IPD, Current IPD, and other pages from this browser tab');
 
     run(`rt='dr';doctorForm()`); let doctorHtml = els['#mf'].innerHTML;
     for (const must of ['Add Doctor', 'Upload Photo', 'Staff ID (Required for Login)', 'Work Shift / Days', 'Department', 'Basic Salary ($)', 'Date Of Joining', 'Signature', 'drsig', 'drsigclear', 'Cancel', 'Save']) assert.ok(doctorHtml.includes(must), 'doctor form missing ' + must + ': ' + doctorHtml);
