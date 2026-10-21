@@ -238,7 +238,7 @@ server.listen(0, '127.0.0.1', async () => {
     const medicineCardsHtml=run('R.med()');
     assert.ok(medicineCardsHtml.includes('medicine-card-grid') && medicineCardsHtml.includes('medicine-card') && medicineCardsHtml.includes('Switch to Table View') && medicineCardsHtml.includes(`data-a="medview:${medicine.id}"`), 'Cards layout should show medicine cards, a single reverse toggle, and a detail action');
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: `mededit:${medicineIndex}` } }) }, preventDefault() {} });
-    assert.equal(run('medicineLayout'), 'table', 'editing a medicine from Cards should switch to Table');
+    assert.equal(run('medicineLayout'), 'cards', 'editing a medicine from Cards should preserve the selected layout');
     assert.equal(run('medicineFormOpen'), true);
     const medicineEditPage=run('R.med()');
     assert.ok(medicineEditPage.includes('<h1>Edit Medicine</h1>') && medicineEditPage.includes('medicine-edit-page') && medicineEditPage.includes('value="Amoxicillin"'));
@@ -247,11 +247,11 @@ server.listen(0, '127.0.0.1', async () => {
     await run('medicineSave(__medEvent)');
     assert.equal(run('medicineFormOpen'), false, 'saving an edit should close the form');
     assert.equal(run('medicineEditIndex'), null);
-    assert.equal(run('medicineLayout'), 'table');
-    assert.ok(run('R.med()').includes('medicine-table-wrap') && !run('R.med()').includes('medicine-form-card'));
+    assert.equal(run('medicineLayout'), 'cards', 'saving should return to Cards when that was the selected layout');
+    assert.ok(run('R.med()').includes('medicine-card-grid') && !run('R.med()').includes('medicine-form-card'));
     assert.equal(run(`D.med.find(x=>x.name=="Amoxicillin").stock`), 35);
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medlayout' } }) }, preventDefault() {} });
-    assert.equal(run('medicineLayout'), 'cards');
+    assert.equal(run('medicineLayout'), 'table');
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medview:' + medicine.id } }) }, preventDefault() {} });
     assert.equal(run('medicineViewId'), String(medicine.id));
     const medicineDetail=run('R.med()');
@@ -259,7 +259,7 @@ server.listen(0, '127.0.0.1', async () => {
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medback' } }) }, preventDefault() {} });
     assert.equal(run('medicineViewId'), null);
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medlayout' } }) }, preventDefault() {} });
-    assert.equal(run('medicineLayout'), 'table');
+    assert.equal(run('medicineLayout'), 'cards');
     medicineHtml = run('R.med()');
     assert.ok(medicineHtml.includes('data-a="medqrbulk"') && medicineHtml.includes('data-a="medbarcodebulk"'), 'medicine page should expose bulk code exports outside row actions');
     assert.ok(!medicineHtml.includes('medqrdownload') && !medicineHtml.includes('medbarcodedownload'), 'bulk code exports should not be in row actions');
