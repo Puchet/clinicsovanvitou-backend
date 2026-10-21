@@ -12,12 +12,12 @@ server.listen(0, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${server.address().port}`;
   const ok = (n) => console.log('  ✓', n);
   const el = () => new Proxy({ dataset: { mode: 'manual' }, classList: { add() {}, remove() {}, toggle() {} }, style: {}, value: '', hidden: false, innerHTML: '', textContent: '', insertAdjacentHTML() {}, querySelector: () => el(), querySelectorAll: () => [] }, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; } });
-  const els = {}; const downloads = []; const listeners = {};
+  const els = {}; const downloads = []; const listeners = {}, windowListeners = {}, location = { hash: '' };
   const sessionValues = {};
   const ctx = vm.createContext({
     console, URL, setTimeout, clearTimeout, Promise, Intl, Date,
     document: { querySelector: (s) => (els[s] = els[s] || el()), querySelectorAll: () => [], addEventListener: (type, fn) => (listeners[type] = [...(listeners[type] || []), fn]), createElement: () => ({ click() { downloads.push(this); }, style: {} }), createTreeWalker: () => ({ nextNode: () => false }), body: { querySelectorAll: () => [] }, documentElement: { dataset: {}, lang: 'en' } },
-    window: { print() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, sessionStorage: { getItem: (key) => sessionValues[key] || null, setItem: (key, value) => { sessionValues[key] = String(value); }, removeItem: (key) => { delete sessionValues[key]; } }, MutationObserver: class { observe() {} }, NodeFilter: { SHOW_TEXT: 4 },
+    window: { location, addEventListener: (type, fn) => (windowListeners[type] = [...(windowListeners[type] || []), fn]), print() {} }, location, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, sessionStorage: { getItem: (key) => sessionValues[key] || null, setItem: (key, value) => { sessionValues[key] = String(value); }, removeItem: (key) => { delete sessionValues[key]; } }, MutationObserver: class { observe() {} }, NodeFilter: { SHOW_TEXT: 4 },
     matchMedia: () => ({ matches: false }), requestAnimationFrame: (f) => f(), confirm: () => true,
     fetch: (u, o) => fetch(base + u, o),
     FormData: class { constructor(f) { this.m = (f && f.__m) || {}; } get(k) { return this.m[k] ?? null; } getAll(k) { return [].concat(this.m[k] ?? []); } [Symbol.iterator]() { return Object.entries(this.m)[Symbol.iterator](); } },
@@ -36,19 +36,21 @@ server.listen(0, '127.0.0.1', async () => {
     ctx.__t = lg.token; run('tok=__t; toast=function(m){__toast=m}'); await run('load()'); ok('app loads data from the API');
     for (const page of ['ap', 'ipd', 'cur', 'med', 'set']) {
       listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'go:' + page } }) }, preventDefault() {} });
-      assert.equal(sessionValues.currentPage, page);
+      assert.equal(sessionValues.currentPage, page); assert.equal(location.hash, '#' + page);
+      sessionValues.currentPage = '';
       run(`rt='dash';restorePage()`);
       assert.equal(run('rt'), page);
     }
     run(`rt='dash';pAct('dashap')`);
     assert.equal(sessionValues.currentPage, 'ap', 'dashboard appointment shortcut should persist the appointments page');
     for (const page of ['ap', 'ipd', 'cur']) {
-      sessionValues.currentPage = page;
+      sessionValues.currentPage = ''; location.hash = '#' + page;
       run(`rt='dash';restorePage()`);
       assert.equal(run('rt'), page, `${page} must be accepted as a valid saved route despite using the generic table renderer`);
     }
+    location.hash = '#ipd'; windowListeners.hashchange[0](); assert.equal(run('rt'), 'ipd', 'browser history changes should switch to the route in the URL');
     run(`cal.mode='month';rt='dash'`);
-    sessionValues.currentPage = 'unknown'; run(`rt='dash';restorePage()`); assert.equal(run('rt'), 'dash');
+    sessionValues.currentPage = 'unknown'; location.hash = '#unknown'; run(`rt='dash';restorePage()`); assert.equal(run('rt'), 'dash');
     ok('refresh restores Appointments, IPD, Current IPD, and other pages from this browser tab');
 
     run(`rt='dr';doctorForm()`); let doctorHtml = els['#mf'].innerHTML;
@@ -226,11 +228,44 @@ server.listen(0, '127.0.0.1', async () => {
     const medicineIndex = run('D.med.indexOf(D.med.find(x=>x.name=="Amoxicillin"))');
     medicineHtml = run('R.med()');
     for (const action of ['medstock', 'medcomposition', 'medqr', 'medbarcode']) assert.ok(medicineHtml.includes(`data-a="${action}:${medicineIndex}"`), 'medicine row missing ' + action + ' action');
+    assert.ok(medicineHtml.includes('data-a="medlayout"') && medicineHtml.includes('Switch to Cards View') && !medicineHtml.includes('medlayout:table') && !medicineHtml.includes('medlayout:cards') && medicineHtml.includes(`data-a="medview:${medicine.id}"`), 'Medicine table should offer a single layout toggle and a detail view');
+    const medicineCss=fs.readFileSync(path.join(frontendDir,'styles.css'),'utf8');
+    assert.match(medicineCss, /\.medicine-card\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\);/s, 'medicine card photo and details should each use half the card width');
+    assert.match(medicineCss, /\.medicine-card-photo\s*\{[^}]*width:\s*calc\(100% - 12px\);[^}]*height:\s*auto;[^}]*aspect-ratio:\s*1;/s, 'medicine card photos should use a square crop at half card width');
+    assert.match(medicineCss, /\.medicine-thumb\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/s, 'medicine table thumbnails should be square');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medlayout' } }) }, preventDefault() {} });
+    assert.equal(run('medicineLayout'), 'cards');
+    const medicineCardsHtml=run('R.med()');
+    assert.ok(medicineCardsHtml.includes('medicine-card-grid') && medicineCardsHtml.includes('medicine-card') && medicineCardsHtml.includes('Switch to Table View') && medicineCardsHtml.includes(`data-a="medview:${medicine.id}"`), 'Cards layout should show medicine cards, a single reverse toggle, and a detail action');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: `mededit:${medicineIndex}` } }) }, preventDefault() {} });
+    assert.equal(run('medicineLayout'), 'table', 'editing a medicine from Cards should switch to Table');
+    assert.equal(run('medicineFormOpen'), true);
+    const medicineEditPage=run('R.med()');
+    assert.ok(medicineEditPage.includes('<h1>Edit Medicine</h1>') && medicineEditPage.includes('medicine-edit-page') && medicineEditPage.includes('value="Amoxicillin"'));
+    assert.ok(!medicineEditPage.includes('medicine-table-wrap'), 'edit should open a dedicated medicine form, not the item list');
+    ctx.__medForm.__m = { name: 'Amoxicillin', composition: '500mg capsule', stock: '35', photo: '', expiration_date: '2027-06-30', notification_date: '2027-05-30' };
+    await run('medicineSave(__medEvent)');
+    assert.equal(run('medicineFormOpen'), false, 'saving an edit should close the form');
+    assert.equal(run('medicineEditIndex'), null);
+    assert.equal(run('medicineLayout'), 'table');
+    assert.ok(run('R.med()').includes('medicine-table-wrap') && !run('R.med()').includes('medicine-form-card'));
+    assert.equal(run(`D.med.find(x=>x.name=="Amoxicillin").stock`), 35);
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medlayout' } }) }, preventDefault() {} });
+    assert.equal(run('medicineLayout'), 'cards');
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medview:' + medicine.id } }) }, preventDefault() {} });
+    assert.equal(run('medicineViewId'), String(medicine.id));
+    const medicineDetail=run('R.med()');
+    for (const detail of ['medicine-detail', 'Back to Medicines', 'Medicine ID:', 'Composition', '500mg capsule', 'Sales units and prices', 'Tablet', 'KHR 5,000', 'Inventory dates', '2027-06-30']) assert.ok(medicineDetail.includes(detail), 'Medicine detail view missing ' + detail);
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medback' } }) }, preventDefault() {} });
+    assert.equal(run('medicineViewId'), null);
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medlayout' } }) }, preventDefault() {} });
+    assert.equal(run('medicineLayout'), 'table');
+    medicineHtml = run('R.med()');
     assert.ok(medicineHtml.includes('data-a="medqrbulk"') && medicineHtml.includes('data-a="medbarcodebulk"'), 'medicine page should expose bulk code exports outside row actions');
     assert.ok(!medicineHtml.includes('medqrdownload') && !medicineHtml.includes('medbarcodedownload'), 'bulk code exports should not be in row actions');
     assert.ok(medicineHtml.includes('500mg capsule') && medicineHtml.includes('Tablet:') && medicineHtml.includes('2027-06-30') && medicineHtml.includes(`data-a="mededit:${medicineIndex}"`));
     run(`viewMedicineComposition(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('500mg capsule') && !els['#mf'].innerHTML.includes('<textarea'));
-    run(`updateMedicineStock(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('Update Stock') && els['#mf'].innerHTML.includes('value="30"'));
+    run(`updateMedicineStock(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('Update Stock') && els['#mf'].innerHTML.includes('value="35"'));
     els['#mf'].__m = { stock: '42' }; await run(`$('#mf').onsubmit({preventDefault(){},target:$('#mf')})`);
     assert.equal(run(`D.med.find(x=>x.name=="Amoxicillin").stock`), 42, ctx.__toast);
     run('printDoc=function(t,h){__printed=[t,h]}');
