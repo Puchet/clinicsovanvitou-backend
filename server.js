@@ -172,8 +172,13 @@ function clean(name, body, partial, spec = RES[name]) {
               if (tag.toLowerCase() === 'img') {
                 const srcMatch = /\bsrc\s*=\s*(["'])(.*?)\1/i.exec(attributes);
                 if (!srcMatch) return '';
+                const source = srcMatch[2].replace(/&amp;/g, '&');
+                if (/^\/uploads\/[a-f0-9]{32}\.(jpg|png|webp)$/i.test(source)) {
+                  const altMatch = /\balt\s*=\s*(["'])(.*?)\1/i.exec(attributes);
+                  return `<img src="${escapeXml(source)}" alt="${escapeXml(altMatch ? altMatch[2] : '')}">`;
+                }
                 try {
-                  const url = new URL(srcMatch[2].replace(/&amp;/g, '&'));
+                  const url = new URL(source);
                   if (url.protocol !== 'https:') return '';
                   const altMatch = /\balt\s*=\s*(["'])(.*?)\1/i.exec(attributes);
                   return `<img src="${escapeXml(url.href)}" alt="${escapeXml(altMatch ? altMatch[2] : '')}">`;

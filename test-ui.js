@@ -438,7 +438,20 @@ server.listen(0, '127.0.0.1', async () => {
     run('rt="echo";q="";render()'); let echoHtml = run('R.echo()');
     for (const must of ['Echo Templates', 'Create Template', 'Upload', 'Download', 'echo-template-grid']) assert.ok(echoHtml.includes(must), 'Echo templates page missing ' + must);
     run('echoForm()'); let echoFormHtml = els['#mf'].innerHTML;
-    for (const must of ['Create Echo Template', 'Template Name', 'Default Font', 'Section Content (Title/Body)', 'contenteditable="true"', 'Insert Table', 'Additional Fields (Optional)', 'Field Name', 'Add Field', 'Add New Section', 'Save Template', 'data-echo-color="foreColor"', 'data-echo-color="hiliteColor"', 'data-a="echoformat:0:createLink"', 'data-a="echoformat:0:insertImage"', '<svg viewBox="0 0 24 24"']) assert.ok(echoFormHtml.includes(must), 'Echo template editor missing ' + must);
+    for (const must of ['Create Echo Template', 'Template Name', 'Default Font', 'Section Content (Title/Body)', 'contenteditable="true"', 'Insert Table', 'Additional Fields (Optional)', 'Field Name', 'Add Field', 'Add New Section', 'Save Template', 'data-echo-color="foreColor"', 'data-echo-color="hiliteColor"', 'data-a="echoformat:0:createLink"', 'data-a="echoformat:0:insertImage"', 'echo-image-file-0', 'accept="image/jpeg,image/png,image/webp"', 'Insert Image From Device', '<svg viewBox="0 0 24 24"']) assert.ok(echoFormHtml.includes(must), 'Echo template editor missing ' + must);
+    let imagePickerOpened = false;
+    els['#echo-image-file-0'] = el();
+    els['#echo-image-file-0'].click = () => { imagePickerOpened = true; };
+    run(`echoFormat('0','insertImage')`);
+    assert.ok(imagePickerOpened, 'Echo image toolbar should open the local file picker');
+    const pngImage = new Blob([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], { type: 'image/png' });
+    ctx.__imageFile = pngImage;
+    let insertedImageUrl = '';
+    ctx.document.execCommand = (command, _, value) => { if (command === 'insertImage') insertedImageUrl = value; };
+    await run(`echoUploadImage('0',__imageFile)`);
+    assert.match(insertedImageUrl, /^\/uploads\/[a-f0-9]{32}\.png$/, 'local image should upload and insert a persistent uploads URL');
+    const uploadedImageUrl = insertedImageUrl;
+    delete ctx.document.execCommand;
     let echoTableDialogHtml = '';
     els['#md'].insertAdjacentHTML = (_, html) => { echoTableDialogHtml = html; };
     run(`echoFormat('0','insertTable')`);
@@ -451,7 +464,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((insertedEchoTable.match(/<tr>/g)||[]).length,3); assert.equal((insertedEchoTable.match(/<th /g)||[]).length,4); assert.equal((insertedEchoTable.match(/<td /g)||[]).length,8);
     assert.ok(insertedEchoTable.includes('background-color:#ffffcc') && insertedEchoTable.includes('border:1px dotted #123456'));
     delete ctx.document.execCommand;
-    els['#mf'].__m = { name: 'Abdominal Ultrasound', price: '25000', font: 'Moul', echo_title_0: 'Findings', echo_content_0: '<p onclick="alert(1)">Liver normal <strong>size</strong> <font color="#ff0000">abnormal</font> <span style="background-color:#ffff00">highlight</span> <a href="https://example.test/report" onclick="alert(1)">report</a> <a href="javascript:alert(1)">bad link</a> <img src="https://example.test/image.jpg" onerror="alert(1)"></p><table style="width:100%;border-collapse:collapse;border:1px dotted #123456"><tbody><tr><th style="border:1px dotted #123456;padding:6px;background-color:#ffffcc" onmouseover="alert(1)">Header</th><td style="border:1px dotted #123456;padding:6px">Value</td></tr></tbody></table><script>alert(2)</script>', echo_field_0_0: 'Patient ID', echo_field_0_1: 'Exam date' };
+    els['#mf'].__m = { name: 'Abdominal Ultrasound', price: '25000', font: 'Moul', echo_title_0: 'Findings', echo_content_0: `<p onclick="alert(1)">Liver normal <strong>size</strong> <font color="#ff0000">abnormal</font> <span style="background-color:#ffff00">highlight</span> <a href="https://example.test/report" onclick="alert(1)">report</a> <a href="javascript:alert(1)">bad link</a> <img src="https://example.test/image.jpg" onerror="alert(1)"><img src="${uploadedImageUrl}" alt="Local"></p><table style="width:100%;border-collapse:collapse;border:1px dotted #123456"><tbody><tr><th style="border:1px dotted #123456;padding:6px;background-color:#ffffcc" onmouseover="alert(1)">Header</th><td style="border:1px dotted #123456;padding:6px">Value</td></tr></tbody></table><script>alert(2)</script>`, echo_field_0_0: 'Patient ID', echo_field_0_1: 'Exam date' };
     await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
     let echoTemplate = run(`D.echo.find(x=>x.name=="Abdominal Ultrasound")`);
     assert.ok(echoTemplate, `echo template was not saved; toast=${run('__toast')}`);
@@ -463,6 +476,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(echoSections[0].content.includes('background-color:#ffffcc') && !echoSections[0].content.includes('onmouseover') && !echoSections[0].content.includes('<script'), 'table styles should remain while unsafe attributes and scripts are removed');
     assert.ok(echoSections[0].content.includes('<span style="color:#ff0000">abnormal</span>') && echoSections[0].content.includes('background-color:#ffff00'), 'text and highlight colors should persist');
     assert.ok(echoSections[0].content.includes('<a href="https://example.test/report"') && echoSections[0].content.includes('<img src="https://example.test/image.jpg"') && !echoSections[0].content.includes('javascript:'), 'safe links and images should persist without event handlers or unsafe URLs');
+    assert.ok(echoSections[0].content.includes(`<img src="${uploadedImageUrl}" alt="Local">`), 'uploaded local image URLs should persist in the saved template');
     echoHtml = run('R.echo()');
     assert.ok(echoHtml.includes('Abdominal Ultrasound') && echoHtml.includes('Font: Moul') && echoHtml.includes('echo-template-price') && echoHtml.includes('data-a="echoedit:') && echoHtml.includes('data-a="echodel:'), 'Echo template cards should show price, font, and edit/delete controls');
     run(`echoForm(D.echo.indexOf(D.echo.find(x=>x.name=="Abdominal Ultrasound")))`);
