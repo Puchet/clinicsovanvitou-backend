@@ -1,6 +1,7 @@
 'use strict';
 // Smoke test: starts the server on a test database and exercises auth, CRUD, POS and permissions.
 const os = require('os'), path = require('path'), assert = require('assert');
+const ExcelJS = require('exceljs');
 process.env.NODE_ENV = 'test';
 process.env.USE_MEM_DB = 'true';
 process.env.JWT_SECRET = 'x'.repeat(40);
@@ -34,6 +35,41 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('GET', '/api/patients?q=sok')).body.length, 1); ok('search works');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { phone: '012 345 678' })).body.phone, '012 345 678'); ok('update patient');
     assert.equal((await call('GET', '/api/patients/99999')).status, 404); ok('404 for missing record');
+    const service = await call('POST', '/api/services', { name: 'Facial care', price: '60000', description: 'សេវាថែរក្សាផ្ទៃមុខ' });
+    assert.equal(service.status, 201); assert.equal(service.body.price, 60000); assert.equal(service.body.description, 'សេវាថែរក្សាផ្ទៃមុខ');
+    assert.equal((await call('PUT', `/api/services/${service.body.id}`, { description: 'ការពិពណ៌នាថ្មី' })).body.description, 'ការពិពណ៌នាថ្មី');
+    assert.equal((await call('GET', '/api/services?q=' + encodeURIComponent('ពិពណ៌នា'))).body[0].description, 'ការពិពណ៌នាថ្មី'); ok('service description is created, updated and searchable');
+    const imported = await call('POST', '/api/services/import', { rows: [
+      { name: 'Imported peel', price: 25000, description: 'First imported service' },
+      { name: 'Imported facial', price: 40000, description: 'Second imported service' },
+    ] });
+    assert.equal(imported.status, 201); assert.equal(imported.body.imported, 2);
+    assert.equal((await call('GET', '/api/services?q=Imported')).body.length, 2); ok('services import accepts multiple rows');
+    const invalidImport = await call('POST', '/api/services/import', { rows: [
+      { name: 'Must roll back', price: 1000 },
+      { price: 2000 },
+    ] });
+    assert.equal(invalidImport.status, 400);
+    assert.equal((await call('GET', '/api/services?q=' + encodeURIComponent('Must roll back'))).body.length, 0); ok('invalid service import is rejected without partial inserts');
+    const exportResponse = await fetch(base + '/api/export/xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({ rows: [{ name: 'Exported service', price: 25000, description: 'Description included' }] }),
+    });
+    assert.equal(exportResponse.status, 200); assert.match(exportResponse.headers.get('content-type'), /spreadsheetml\.sheet/);
+    assert.match(exportResponse.headers.get('content-disposition'), /\.xlsx/);
+    const workbookBytes = Buffer.from(await exportResponse.arrayBuffer()), workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(workbookBytes);
+    const sheet = workbook.worksheets[0];
+    assert.equal(sheet.getRow(1).getCell(3).value, 'description');
+    assert.equal(sheet.getRow(2).getCell(3).value, 'Description included');
+    const xlsxImport = await fetch(base + '/api/services/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Authorization: 'Bearer ' + token },
+      body: workbookBytes,
+    });
+    assert.equal(xlsxImport.status, 201); assert.equal((await xlsxImport.json()).imported, 1);
+    assert.equal((await call('GET', '/api/services?q=Exported')).body[0].description, 'Description included'); ok('real Excel export includes service descriptions and imports back into Services');
 
     const med = (await call('POST', '/api/medicines', { name: 'Paracetamol', price: 500, stock: 10 })).body;
     let s = await call('POST', '/api/sales', { method: 'Cash', items: [{ medicine_id: med.id, qty: 4 }] });

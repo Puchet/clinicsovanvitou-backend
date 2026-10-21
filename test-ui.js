@@ -1,6 +1,7 @@
 'use strict';
 // UI logic test: runs the real frontend scripts (app.js + patient.js) in a simulated browser against a live server.
 const os = require('os'), path = require('path'), fs = require('fs'), vm = require('vm'), assert = require('assert');
+const ExcelJS = require('exceljs');
 process.env.NODE_ENV = 'test';
 process.env.USE_MEM_DB = 'true';
 process.env.JWT_SECRET = 'y'.repeat(40);
@@ -11,10 +12,10 @@ server.listen(0, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${server.address().port}`;
   const ok = (n) => console.log('  ✓', n);
   const el = () => new Proxy({ dataset: { mode: 'manual' }, classList: { add() {}, remove() {}, toggle() {} }, style: {}, value: '', hidden: false, innerHTML: '', textContent: '', insertAdjacentHTML() {}, querySelector: () => el(), querySelectorAll: () => [] }, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; } });
-  const els = {}; const downloads = [];
+  const els = {}; const downloads = []; const listeners = {};
   const ctx = vm.createContext({
     console, URL, setTimeout, clearTimeout, Promise, Intl, Date,
-    document: { querySelector: (s) => (els[s] = els[s] || el()), querySelectorAll: () => [], addEventListener() {}, createElement: () => ({ click() { downloads.push(this); }, style: {} }), createTreeWalker: () => ({ nextNode: () => false }), body: { querySelectorAll: () => [] }, documentElement: { dataset: {}, lang: 'en' } },
+    document: { querySelector: (s) => (els[s] = els[s] || el()), querySelectorAll: () => [], addEventListener: (type, fn) => (listeners[type] = [...(listeners[type] || []), fn]), createElement: () => ({ click() { downloads.push(this); }, style: {} }), createTreeWalker: () => ({ nextNode: () => false }), body: { querySelectorAll: () => [] }, documentElement: { dataset: {}, lang: 'en' } },
     window: { print() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, MutationObserver: class { observe() {} }, NodeFilter: { SHOW_TEXT: 4 },
     matchMedia: () => ({ matches: false }), requestAnimationFrame: (f) => f(), confirm: () => true,
     fetch: (u, o) => fetch(base + u, o),
@@ -192,6 +193,39 @@ server.listen(0, '127.0.0.1', async () => {
     ok('paid billing history can print payment receipts; payment actions are disabled when no balance remains');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
 
+    // ---- Services cards and Add / Edit form ----
+    run('rt="sv";q="";render()'); let serviceHtml = run('R.sv()');
+    assert.ok(serviceHtml.includes('data-a="svimport"') && serviceHtml.includes('id="sv-import-file"') && serviceHtml.includes('accept=".csv,.xlsx'), 'Services screen should expose Excel and CSV import');
+    const parsedServices = JSON.parse(JSON.stringify(run(`parseServiceCsv('\\ufeffService Name,Price (KHR),Description\\r\\n"Peel, premium","25,000","Includes ""aftercare"", too"')`)));
+    assert.deepEqual(parsedServices, [{ name: 'Peel, premium', price: 25000, description: 'Includes "aftercare", too' }]);
+    run(`$('#sv-import-file')`); let pickerOpened = false; els['#sv-import-file'].click = () => { pickerOpened = true; };
+    listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'svimport' } }) }, preventDefault() {} });
+    assert.ok(pickerOpened, 'Import Excel action should open the file picker');
+    const importFile = { name: 'services.csv', size: 120, text: async () => 'name,price,description\r\n"CSV peel",25000,"Peel, premium"\r\nCSV facial,40000,Khmer service' };
+    const fileInput = { id: 'sv-import-file', files: [importFile], value: 'services.csv' };
+    await listeners.change.find(fn => fn.toString().includes('sv-import-file'))({ target: fileInput });
+    assert.equal(fileInput.value, ''); assert.equal(run(`D.sv.find(x=>x.name=="CSV peel").price`), 25000); assert.equal(run(`D.sv.find(x=>x.name=="CSV peel").description`), 'Peel, premium');
+    assert.equal(run(`D.sv.find(x=>x.name=="CSV facial").price`), 40000); ok('Excel-compatible CSV import handles quoted fields, saves services and resets the file input');
+    const serviceCount = run('D.sv.length');
+    await run(`importServicesFile({name:'bad.csv',size:10,text:async()=>'name,price\\nMissing price,not-a-number'})`);
+    assert.equal(run('D.sv.length'), serviceCount); assert.match(run('__toast'), /Row 2: price must be a whole number/); ok('invalid CSV import reports row errors without changing services');
+    const workbookForImport = new ExcelJS.Workbook(), importSheet = workbookForImport.addWorksheet('Services');
+    importSheet.addRow(['Service Name', 'Price (KHR)', 'Description']); importSheet.addRow(['Excel service', 35000, 'Imported from workbook']);
+    const importBytes = Buffer.from(await workbookForImport.xlsx.writeBuffer());
+    ctx.__xlsx = { name: 'services.xlsx', size: importBytes.length, arrayBuffer: async () => importBytes.buffer.slice(importBytes.byteOffset, importBytes.byteOffset + importBytes.byteLength) };
+    await run('importServicesFile(__xlsx)');
+    const xlsxService = run(`D.sv.find(x=>x.name=="Excel service")`);
+    assert.ok(xlsxService && xlsxService.price == 35000 && xlsxService.description == 'Imported from workbook'); ok('Services import accepts real .xlsx workbooks');
+    run('serviceForm()'); serviceHtml = els['#mf'].innerHTML;
+    for (const must of ['Add Service', 'name="name"', 'name="price"', 'name="description"', 'type="number"', 'min="0"', 'e.g. Facial treatment', 'e.g. 60000', 'Enter service details', 'data-a="close"', 'Add']) assert.ok(serviceHtml.includes(must), 'service form missing ' + must);
+    els['#mf'].__m = { name: 'Facial care', price: '60000', description: 'សេវាថែរក្សាផ្ទៃមុខ' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`);
+    let service = run(`D.sv.find(x=>x.name=="Facial care")`); assert.ok(service, `service was not saved; toast=${run('__toast')}; services=${JSON.stringify(run('D.sv'))}`); assert.equal(service.price, 60000); assert.equal(service.description, 'សេវាថែរក្សាផ្ទៃមុខ');
+    serviceHtml = run('R.sv()'); assert.ok(serviceHtml.includes('service-grid') && serviceHtml.includes('Facial care') && serviceHtml.includes('KHR 60,000') && serviceHtml.includes('សេវាថែរក្សាផ្ទៃមុខ') && serviceHtml.includes(`data-a="edit:sv:${run('D.sv.findIndex(x=>x.name=="Facial care")')}"`) && serviceHtml.includes(`data-a="del:sv:${run('D.sv.findIndex(x=>x.name=="Facial care")')}"`)); ok('Services are displayed as searchable cards with price, description and Edit/Delete actions');
+    run(`serviceForm(D.sv.indexOf(D.sv.find(x=>x.name=="Facial care")))`); assert.ok(els['#mf'].innerHTML.includes('Edit Service') && els['#mf'].innerHTML.includes('value="Facial care"') && els['#mf'].innerHTML.includes('សេវាថែរក្សាផ្ទៃមុខ') && els['#mf'].innerHTML.includes('>Save</button>'));
+    els['#mf'].__m = { name: 'Facial care', price: '65000', description: 'Updated service description' };
+    await run(`$("#mf").onsubmit({preventDefault(){},target:$("#mf")})`); service = run(`D.sv.find(x=>x.name=="Facial care")`); assert.equal(service.price, 65000); assert.equal(service.description, 'Updated service description'); ok('service edits save updated price and description');
+
     // ---- Consultation Form (CNF) ----
     run('cnfForm()'); for (const must of ['General Form', 'Assessment &amp; Plan', 'Form History', '1. Problems &amp; Concerns', 'Acne scars', '2. Skin type', '3. History of reactions', 'Product usage history', 'Medicine usage', 'Treatment history', 'Personal &amp; family history', 'Lifestyle', 'For women', 'Treatment Agreement', 'Acceptance &amp; Results', 'Guarantee of Care', 'Privacy Notice', 'Photo Consent', 'Responsibility', 'Other Notices', 'Payment Policy', 'Customer understanding', 'Warnings &amp; conditions', 'Personal interview', 'Customer name', 'Test Patient', 'No history records yet', 'Occupation', 'Address override', 'Personal Interview', 'Doctor’s Assessment', 'Doctor’s Treatment Plan', 'Special Notes - Image 5', 'Have you visited our clinic before?', 'TikTok', 'Telegram', 'Facebook', 'Current address', 'Additional notes']) assert.ok(ctx.__body.replace(/&amp;/g, '&amp;').includes(must) || ctx.__body.includes(must.replace('&amp;', '&')), 'CNF form missing ' + must);
     assert.ok(ctx.__opts.extra.includes('Print Current') && ctx.__opts.ok == 'Save Only'); ok('Consultation Form has every section, Form History and Print Current / Save Only');
@@ -199,8 +233,9 @@ server.listen(0, '127.0.0.1', async () => {
     await run('__save(__f)'); const cn = run('recs.find(r=>r.kind=="cnf")'); const cd = JSON.parse(cn.data); assert.deepEqual(cd.prob, ['Acne', 'Wrinkles']); assert.equal(cd.prob_o, 'freckles'); assert.equal(cd.as_interview, 'Discussed expectations'); assert.equal(cd.as_ass, 'Acne vulgaris'); assert.equal(cd.as_plan, 'Peel x6'); assert.deepEqual(cd.as_previous, ['បាទ/ចាស']); assert.deepEqual(cd.as_source, ['Telegram', 'Facebook']); assert.equal(cd.as_note, 'Edited wording'); assert.equal(cd.ag_acc, 'Edited wording'); ok('CNF answers, agreement text and assessment saved together');
     run(`cnfForm(recs.find(r=>r.kind=="cnf"))`); assert.ok(/value="Teacher"/.test(ctx.__body) && /value="Acne"\s+checked/.test(ctx.__body) && ctx.__body.includes('Edited wording') && ctx.__body.includes('Discussed expectations') && /value="Telegram"\s+checked/.test(ctx.__body) && ctx.__body.includes('data-a="cnfload:')); ok('saved CNF re-opens pre-filled and appears in Form History');
     const cp = run(`cnPrintHtml(JSON.parse(recs.find(r=>r.kind=="cnf").data))`); assert.ok(cp.includes('Acne, Wrinkles') && cp.includes('freckles') && cp.includes('Edited wording') && cp.includes('Acne vulgaris') && cp.includes('Personal Interview') && cp.includes('Telegram, Facebook') && cp.includes('Assessment')); ok('CNF printout contains the answers and assessment');
-    run('D.clinic.cnf_text=JSON.stringify({pay:"Pay at the desk"})'); assert.equal(run('cnfTexts().pay'), 'Pay at the desk'); assert.ok(run('cnfTexts().acc').length > 20); run('cnfForm()'); assert.ok(ctx.__body.includes('Pay at the desk')); ok('agreement wording comes from Clinic Settings (defaults for anything not set)');
-    html = run('R.set()'); assert.ok(html.includes('Consultation form agreement text') && html.includes('name="cnf_acc"') && html.includes('name="cnf_pay"')); ok('Clinic Settings can edit the agreement wording');
+    run('lang="km"; cnfForm()'); assert.ok(ctx.__body.includes('មុខរបរ (Occupation)') && ctx.__body.includes('១. បញ្ហា និងកង្វល់ (1. Problems & Concerns)') && ctx.__body.includes('មុន (Acne)') && ctx.__body.includes('value="Acne"') && ctx.__body.includes('ខ្ញុំយល់ព្រម និងទទួលយកផែនការព្យាបាល')); assert.ok(ctx.__body.includes('General Form') && ctx.__body.includes('Form History') && ctx.__body.includes('បាទ/ចាស') && !ctx.__body.includes('បាទ/ចាស (Yes)') && ctx.__body.includes('ផលិតផលដែលកំពុងប្រើ (7. Current products)') && !ctx.__body.includes('ហ្វូមលាងមុខ (Cleanser)')); const kmPrint = run(`cnPrintHtml({prob:["Acne"],react:["None"],ag_acc:cnfTexts().acc})`); assert.ok(kmPrint.includes('មុន (Acne)') && kmPrint.includes('៣. តើអ្នកធ្លាប់មានប្រតិកម្មចំពោះចំណុចណាមួយខាងក្រោមនេះដែរឬទេ? (History of Reactions)') && kmPrint.includes('ការវាយតម្លៃ និងផែនការ (Assessment & Plan)') && kmPrint.includes('ការយល់ព្រម និងលទ្ធផល (Acceptance & Results)')); ok('CNF General Form matches screenshot Khmer/bilingual labels and choices, while keeping English tabs and stored values'); run('lang="en"');
+    run('D.clinic.cnf_text=JSON.stringify({pay:"Pay at the desk",acc:"Custom English",acc_km:"ខ្លឹមសារផ្ទាល់ខ្លួន"})'); assert.equal(run('cnfTexts().pay'), 'Pay at the desk'); assert.equal(run('cnfTexts().acc'), 'Custom English'); run('lang="km"'); assert.equal(run('cnfTexts().acc'), 'ខ្លឹមសារផ្ទាល់ខ្លួន'); assert.equal(run('cnfTexts().pay'), 'Pay at the desk'); run('lang="en"; cnfForm()'); assert.ok(ctx.__body.includes('Pay at the desk')); ok('English and Khmer agreement wording is independently configurable with legacy-text fallback');
+    html = run('R.set()'); assert.ok(html.includes('Consultation form agreement text') && html.includes('name="cnf_acc"') && html.includes('name="cnf_acc_km"') && html.includes('name="cnf_pay"') && html.includes('name="cnf_pay_km"')); ok('Clinic Settings can edit agreement wording in English and Khmer');
     run('printDoc=function(t,h){}'); run('ptab="medical"');
 
     // ---- Dashboard links ----
@@ -213,9 +248,21 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(/Common complaints[\s\S]*cough[\s\S]*?>1</.test(run('R.dash()'))); ok('common complaints chart counts real patient complaints');
     ctx.__d = { dfrom: '2030-01-01', dto: '' }; run('rt="dash"; dFrom="2030-01-01"'); assert.ok(!/Patients by address[\s\S]*?Phnom Penh/.test(run('R.dash()'))); run('dFrom=""'); assert.ok(run('R.dash()').includes('Phnom Penh')); ok('date filter narrows the dashboard charts');
 
-    // CSV export
+    // Excel export
     await run("api('POST','medicines',{name:'=SUM(1,1)',price:500,stock:5})"); await run('load()');
-    run('rt="med"'); run('exportCsv()'); const csv = downloads.blob.p[0]; assert.ok(csv.includes('name') && csv.startsWith('\ufeff') && csv.includes('SUM')); ok('CSV export builds a file'); assert.ok(!csv.includes('"=SUM') && csv.includes("\"'=SUM(1,1)\"")); ok('CSV cells that start with = + - @ are neutralised (Excel formula injection)');
+    run('rt="sv"'); await run('exportExcel()'); let exportedBook = new ExcelJS.Workbook(); await exportedBook.xlsx.load(Buffer.from(downloads.blob.p[0]));
+    let exportedSheet = exportedBook.worksheets[0], exportedHeaders = exportedSheet.getRow(1).values.slice(1);
+    assert.ok(downloads[downloads.length - 1].download.endsWith('.xlsx') && exportedHeaders.includes('description'));
+    const descCol = exportedHeaders.indexOf('description') + 1, exportedServiceRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(1).value == 'Facial care');
+    assert.ok(exportedServiceRow && exportedServiceRow.getCell(descCol).value == 'Updated service description'); ok('Excel export downloads a real .xlsx workbook with the service Description column');
+    run('rt="med"'); await run('exportExcel()'); exportedBook = new ExcelJS.Workbook(); await exportedBook.xlsx.load(Buffer.from(downloads.blob.p[0]));
+    exportedSheet = exportedBook.worksheets[0]; const formulaRow = Array.from({ length: exportedSheet.rowCount - 1 }, (_, i) => exportedSheet.getRow(i + 2)).find(r => r.getCell(1).value == "'=SUM(1,1)");
+    assert.ok(formulaRow); ok('Excel cells that start with formula characters are neutralised');
+    const realFetch = ctx.fetch;
+    ctx.fetch = async () => ({ status: 404, ok: false, json: async () => ({ error: 'Not found' }) });
+    await run('exportExcel()');
+    assert.match(run('__toast'), /Excel export API not found.*Restart the backend server/);
+    ctx.fetch = realFetch; ok('missing export route tells the user to restart the backend');
 
     // patient name is clickable in the list; calendar adds an appointment through the modal
     run('rt="pt"'); assert.ok(run('R.pt()').includes('data-a="open:') && run('R.pt()').includes('data-a="reg"')); ok('patient list opens patient file and registration form');

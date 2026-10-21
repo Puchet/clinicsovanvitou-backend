@@ -15,7 +15,7 @@ const RES = {
   doctors:       { cols: { name: 's!', role: 's', code: 's!', phone: 's', av: 's', workdays: 's', photo: 's', signature: 'j', department: 's', specialist: 's', epf_no: 's', basic_salary_cents: 'i', contract_type: 's', work_location: 's', date_joined: 's' }, search: ['name', 'code', 'role'], order: 'id' },
   payslips:      { cols: { doctor_id: 'i!', period_month: 'i!', period_year: 'i!', date_start: 's!', date_end: 's!', basic_cents: 'i!', position_allowance_cents: 'i!', overtime_cents: 'i!', benefits_cents: 'i!', deduction_cents: 'i!', note: 'x' }, search: ['note'], order: 'period_year DESC, period_month DESC, id DESC' },
   medicines:     { cols: { name: 's!', price: 'i', stock: 'i', photo: 's' }, search: ['name'], order: 'LOWER(name)' },
-  services:      { cols: { name: 's!', price: 'i' }, search: ['name'], order: 'LOWER(name)' },
+  services:      { cols: { name: 's!', price: 'i', description: 'x' }, search: ['name', 'description'], order: 'LOWER(name)' },
   labs:          { cols: { name: 's!', price: 'i', cat: 's' }, search: ['name', 'cat'], order: 'LOWER(name)' },
   echo:          { cols: { name: 's!', price: 'i', font: 's' }, search: ['name'], order: 'LOWER(name)' },
   diagnoses:     { cols: { name: 's!' }, search: ['name'], order: 'LOWER(name)' },

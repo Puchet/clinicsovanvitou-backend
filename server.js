@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const crypto = require('crypto');
+const ExcelJS = require('exceljs');
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env file */ }
 const { initDb, close, query, queryOne, queryAll, tx, RES, CLINIC, dataDir } = require('./db');
 const { hashPw, checkPw, sign, verify, initAuth } = require('./auth');
@@ -23,21 +24,21 @@ class HttpError extends Error { constructor(status, msg) { super(msg); this.stat
 const bad = (m) => new HttpError(400, m);
 
 // ---------- helpers ----------
-async function readJson(req) {
+async function readJson(req, max = 1e6) {
   let size = 0; const chunks = [];
   for await (const c of req) {
     size += c.length;
-    if (size > 1e6) throw new HttpError(413, 'Request too large');
+    if (size > max) throw new HttpError(413, 'Request too large');
     chunks.push(c);
   }
   if (!size) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { throw bad('Invalid JSON'); }
 }
-async function readRaw(req, max) {
+async function readRaw(req, max, message = 'Picture is too large (max 2 MB)') {
   let size = 0; const chunks = [];
   for await (const c of req) {
     size += c.length;
-    if (size > max) throw new HttpError(413, 'Picture is too large (max 2 MB)');
+    if (size > max) throw new HttpError(413, message);
     chunks.push(c);
   }
   return Buffer.concat(chunks);
@@ -99,6 +100,21 @@ function clean(name, body, partial, spec = RES[name]) {
     if ('color' in out && out.color && !/^#[0-9a-fA-F]{6}$/.test(out.color)) throw bad('color is not valid');
   }
   return out;
+}
+async function importServices(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('rows must contain 1–1000 services');
+  const services = rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || !('price' in row)) throw bad('Each service must include a name and price');
+    return clean('services', row, false);
+  });
+  await tx(async (client) => {
+    for (const service of services) {
+      await client.query('INSERT INTO services(name,price,description) VALUES($1,$2,$3)', [
+        service.name, service.price ?? 0, service.description ?? '',
+      ]);
+    }
+  });
+  return services.length;
 }
 
 const isEmail = (s) => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
@@ -162,6 +178,32 @@ async function api(req, res, url) {
     await query('UPDATE users SET pass=$1 WHERE id=$2', [await hashPw(String(body.password)), user.id]);
     fails.delete(key);
     return send(res, 200, { ok: true });
+  }
+
+  if (a === 'export' && b === 'xlsx' && m === 'POST') {
+    const body = await readJson(req, 10e6);
+    if (!Array.isArray(body.rows) || !body.rows.length || body.rows.length > 5000) throw bad('rows must contain 1–5,000 records');
+    const columns = Object.keys(body.rows[0]);
+    if (!columns.length || columns.length > 100 || columns.some((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))) throw bad('Invalid export columns');
+    if (body.rows.some((row) => !row || typeof row !== 'object' || Array.isArray(row))) throw bad('Each export row must be an object');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Export');
+    sheet.columns = columns.map((key) => ({ header: key, key }));
+    for (const row of body.rows) {
+      sheet.addRow(Object.fromEntries(columns.map((key) => {
+        let value = row[key];
+        if (typeof value === 'string' && /^[=+\-@\t\r]/.test(value)) value = "'" + value;
+        return [key, value ?? ''];
+      })));
+    }
+    const data = Buffer.from(await workbook.xlsx.writeBuffer());
+    res.writeHead(200, {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': 'attachment; filename="export.xlsx"',
+      'Cache-Control': 'no-store',
+      'Content-Length': data.length,
+    });
+    return res.end(data);
   }
 
   if (a === 'clinic' && !b) {
@@ -262,6 +304,37 @@ async function api(req, res, url) {
     fs.mkdirSync(UPLOADS, { recursive: true });
     fs.writeFileSync(path.join(UPLOADS, name), buf);
     return send(res, 201, { photo: name });
+  }
+
+  if (a === 'services' && b === 'import' && m === 'POST') {
+    const body = await readJson(req);
+    return send(res, 201, { imported: await importServices(body.rows) });
+  }
+
+  if (a === 'services' && b === 'import-xlsx' && m === 'POST') {
+    const buffer = await readRaw(req, 1e6, 'Excel workbook is too large (max 1 MB)');
+    let workbook;
+    try { workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(buffer); }
+    catch { throw bad('Invalid Excel workbook'); }
+    const sheet = workbook.worksheets[0];
+    if (!sheet || sheet.rowCount < 2) throw bad('Excel workbook must include a header and at least one service');
+    if (sheet.rowCount > 1001) throw bad('Excel workbook can contain up to 1,000 services');
+    const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const headers = sheet.getRow(1).values.slice(1).map(normalize);
+    const find = (...names) => headers.findIndex((header) => names.includes(header));
+    const nameIndex = find('name', 'servicename', 'service'), priceIndex = find('price', 'pricekhr', 'amount'), descriptionIndex = find('description', 'details');
+    if (nameIndex < 0 || priceIndex < 0) throw bad('Excel workbook needs name and price columns');
+    const rows = [];
+    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+      const values = sheet.getRow(rowNumber).values.slice(1);
+      if (!values.some((value) => value != null && String(value).trim())) continue;
+      rows.push({
+        name: values[nameIndex] ?? '',
+        price: values[priceIndex] ?? '',
+        description: descriptionIndex < 0 ? '' : values[descriptionIndex] ?? '',
+      });
+    }
+    return send(res, 201, { imported: await importServices(rows) });
   }
 
   // generic CRUD: /api/<resource>[/<id>]
