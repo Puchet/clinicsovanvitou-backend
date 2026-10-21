@@ -209,6 +209,8 @@ server.listen(0, '127.0.0.1', async () => {
     const medicineIndex = run('D.med.indexOf(D.med.find(x=>x.name=="Amoxicillin"))');
     medicineHtml = run('R.med()');
     for (const action of ['medstock', 'medcomposition', 'medqr', 'medbarcode']) assert.ok(medicineHtml.includes(`data-a="${action}:${medicineIndex}"`), 'medicine row missing ' + action + ' action');
+    assert.ok(medicineHtml.includes('data-a="medqrbulk"') && medicineHtml.includes('data-a="medbarcodebulk"'), 'medicine page should expose bulk code exports outside row actions');
+    assert.ok(!medicineHtml.includes('medqrdownload') && !medicineHtml.includes('medbarcodedownload'), 'bulk code exports should not be in row actions');
     assert.ok(medicineHtml.includes('500mg capsule') && medicineHtml.includes('Tablet:') && medicineHtml.includes('2027-06-30') && medicineHtml.includes(`data-a="mededit:${medicineIndex}"`));
     run(`viewMedicineComposition(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('500mg capsule') && !els['#mf'].innerHTML.includes('<textarea'));
     run(`updateMedicineStock(${medicineIndex})`); assert.ok(els['#mf'].innerHTML.includes('Update Stock') && els['#mf'].innerHTML.includes('value="30"'));
@@ -220,7 +222,15 @@ server.listen(0, '127.0.0.1', async () => {
     await run(`printMedicineCode(${medicineIndex},'barcode')`);
     assert.equal(ctx.__printed[0], 'Medicine Barcode'); assert.ok(ctx.__printed[1].includes('Amoxicillin') && ctx.__printed[1].includes('<svg'));
     run('printDoc=__nativePrintDoc');
-    ok('medicine stock, composition, QR, and barcode actions are available from the row');
+    run('rt="med";q=""'); await run(`exportMedicineCodes('qr')`);
+    assert.equal(downloads[downloads.length - 1].download, 'medicine-qr-codes.svg');
+    const qrSheet = await downloads.blob.text();
+    assert.ok(qrSheet.includes('Amoxicillin')); assert.equal((qrSheet.match(/<svg x="/g) || []).length, run('D.med.length'));
+    await run(`exportMedicineCodes('barcode')`);
+    assert.equal(downloads[downloads.length - 1].download, 'medicine-barcode-codes.svg');
+    const barcodeSheet = await downloads.blob.text();
+    assert.ok(barcodeSheet.includes('Amoxicillin')); assert.equal((barcodeSheet.match(/<svg x="/g) || []).length, run('D.med.length'));
+    ok('medicine stock, composition, print actions, and toolbar bulk code exports work');
     run(`medicineEditIndex=D.med.indexOf(D.med.find(x=>x.name=="Amoxicillin"));medicineFormOpen=true;render()`); medicineHtml = run('R.med()');
     assert.ok(medicineHtml.includes('value="Amoxicillin"') && medicineHtml.includes('value="500mg capsule"') && medicineHtml.includes('value="Tablet"'));
     ok('Medicines list and Add/Edit form support image, composition, stock, multiple sales units, and dates');

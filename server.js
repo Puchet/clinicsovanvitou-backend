@@ -59,6 +59,10 @@ function send(res, status, body, extra = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra });
   res.end(data);
 }
+const medicineCodeSvg = (medicine, kind) => kind === 'qr'
+  ? QRCode.toString(JSON.stringify({ id: medicine.id, name: medicine.name, composition: medicine.composition }), { type: 'svg', errorCorrectionLevel: 'M', margin: 2, width: 256 })
+  : bwipjs.toSVG({ bcid: 'code128', text: String(medicine.id), scale: 3, height: 15, includetext: true, textxalign: 'center' });
+const escapeXml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[char]);
 function clean(name, body, partial, spec = RES[name]) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('Body must be a JSON object');
   const out = {};
@@ -256,10 +260,41 @@ async function api(req, res, url) {
     if (!Number.isInteger(id) || id < 1) throw new HttpError(404, 'Not found');
     const medicine = await queryOne('SELECT id,name,composition FROM medicines WHERE id=$1', [id]);
     if (!medicine) throw new HttpError(404, 'Medicine not found');
-    const svg = d === 'qr'
-      ? await QRCode.toString(JSON.stringify({ id: medicine.id, name: medicine.name, composition: medicine.composition }), { type: 'svg', errorCorrectionLevel: 'M', margin: 2, width: 256 })
-      : bwipjs.toSVG({ bcid: 'code128', text: String(medicine.id), scale: 3, height: 15, includetext: true, textxalign: 'center' });
+    const svg = await medicineCodeSvg(medicine, d);
     return send(res, 200, { svg });
+  }
+
+  if (a === 'medicines' && b === 'codes' && ['qr', 'barcode'].includes(c) && m === 'POST') {
+    const body = await readJson(req);
+    if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 5000 || body.ids.some((id) => !Number.isInteger(id) || id < 1)) {
+      throw bad('ids must contain 1–5,000 positive medicine IDs');
+    }
+    const ids = [...new Set(body.ids)];
+    const rows = await queryAll(`SELECT id,name,composition FROM medicines WHERE id IN (${ids.map((_, index) => `$${index + 1}`).join(',')})`, ids);
+    if (rows.length !== ids.length) throw new HttpError(404, 'One or more medicines were not found');
+    const medicines = new Map(rows.map((medicine) => [medicine.id, medicine]));
+    const codes = await Promise.all(ids.map(async (id) => {
+      const medicine = medicines.get(id);
+      const svg = await medicineCodeSvg(medicine, c);
+      const viewBox = svg.match(/\bviewBox="([^"]+)"/);
+      if (!viewBox) throw new Error('Generated medicine code has no viewBox');
+      const content = svg.slice(svg.indexOf('>') + 1, svg.lastIndexOf('</svg>'));
+      return { medicine, viewBox: viewBox[1], content };
+    }));
+    const rowHeight = c === 'qr' ? 280 : 220;
+    const codeSize = c === 'qr' ? 210 : 180;
+    const labels = codes.map(({ medicine, viewBox, content }, index) => {
+      const y = index * rowHeight;
+      return `<rect x="0" y="${y}" width="800" height="${rowHeight}" fill="#fff"/><svg x="24" y="${y + 16}" width="${codeSize}" height="${rowHeight - 32}" viewBox="${viewBox}">${content}</svg><text x="260" y="${y + 95}" font-family="Arial,sans-serif" font-size="24" font-weight="bold">${escapeXml(medicine.name)}</text><text x="260" y="${y + 132}" font-family="Arial,sans-serif" font-size="18">Medicine ID: ${medicine.id}</text>`;
+    }).join('');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="${rowHeight * codes.length}" viewBox="0 0 800 ${rowHeight * codes.length}">${labels}</svg>`;
+    res.writeHead(200, {
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+      'Content-Disposition': `attachment; filename="medicine-${c}-codes.svg"`,
+      'Cache-Control': 'no-store',
+      'Content-Length': Buffer.byteLength(svg),
+    });
+    return res.end(svg);
   }
 
   if (a === 'export' && b === 'xlsx' && m === 'POST') {

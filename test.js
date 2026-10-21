@@ -85,6 +85,20 @@ server.listen(0, '127.0.0.1', async () => {
     const barCode = await call('GET', `/api/medicines/${detailedMedicine.body.id}/code/barcode`);
     assert.equal(qrCode.status, 200); assert.match(qrCode.body.svg, /^<svg/);
     assert.equal(barCode.status, 200); assert.match(barCode.body.svg, /^<svg/); ok('medicine QR and Code 128 barcode labels generate as SVG');
+    for (const kind of ['qr', 'barcode']) {
+      const response = await fetch(`${base}/api/medicines/codes/${kind}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({ ids: [med.id, detailedMedicine.body.id] }),
+      });
+      const svg = await response.text();
+      assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /image\/svg\+xml/);
+      assert.match(response.headers.get('content-disposition'), new RegExp(`medicine-${kind}-codes\\.svg`));
+      assert.equal((svg.match(/<svg/g) || []).length, 3);
+      assert.ok(svg.includes('Paracetamol') && svg.includes('Paracetamol 500mg'));
+    }
+    assert.equal((await call('POST', '/api/medicines/codes/qr', { ids: [med.id, 0] })).status, 400);
+    ok('bulk QR and barcode exports include all requested medicines in downloadable SVG sheets');
     assert.equal((await call('GET', '/api/medicines?q=500mg')).body[0].id, detailedMedicine.body.id);
     assert.equal((await call('POST', '/api/medicines', { name: 'Bad date', expiration_date: '2026-99-99' })).status, 400);
     assert.equal((await call('POST', '/api/medicines', { name: 'Bad unit', units: JSON.stringify([{ name: '', price: 500, qty: 1 }]) })).status, 400); ok('medicine details, multiple sales units, expiry dates, and validation persist');
