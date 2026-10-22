@@ -154,6 +154,39 @@ server.listen(0, '127.0.0.1', async () => {
     const tf = run(`recs.find(r=>r.patient_id==${p.id}&&r.kind=='treatment')`);
     assert.ok(tf, ctx.__toast || 'treatment follow-up record was not saved'); assert.equal(tf.notes, 'Continue treatment'); assert.equal(JSON.parse(tf.data).diagnosis, 'Follow-up, improving');
     assert.equal(JSON.parse(tf.data).vitals, 'BP: 120/80\\nTemp: 37.2 °C'); ok('treatment follow-up saves vitals, diagnosis and treatment notes');
+    run("D.sv.push({id:993,name:'Operation Service',price:0});ptab='operation';genForm()");
+    let operationHtml = els['#mf'].innerHTML;
+    for (const must of ['New Operation Request Form', 'Requested by *', 'Requested date *', 'Service *', 'Operation date *', 'List Participants', 'Add physician', 'Form Type', 'Surgical Procedure', 'Patient Profile/Condition', 'Pre-OP Diagnosis', 'Procedure/Indication', 'Post-OP Diagnosis', 'Anesthesia Type', 'Anesthesia Desc', 'Description of Procedure', 'Preoperative Medications', 'Preparation of the Patient', 'Position of the Patient', 'Incision Site', 'Technique / Procedure', 'Assessment before Closure', 'Instruments &amp; Sponges Count', 'Materials Input', 'Closure Description', 'Estimation blood loss', 'Blood Transfusion', 'Further Investigation', 'Complications prediction', 'Post-OP Plan']) assert.ok(operationHtml.includes(must), 'operation request form missing ' + must);
+    assert.ok(run(`operationParticipantRow(${doctor.id})`).includes('Dr. Follow-up'), 'operation participants should select existing physicians');
+    let addedParticipant = '';
+    run("$('#operation-participants')");
+    els['#operation-participants'].insertAdjacentHTML = (position, markup) => { addedParticipant = markup; };
+    run("pAct('opaddphysician')");
+    assert.ok(addedParticipant.includes('name="participants"'), 'Add physician should create a participant selector');
+    ctx.__removedParticipant = false;
+    run("pAct('opremovephysician',null,null,{closest:()=>({remove:()=>{__removedParticipant=true}})})");
+    const removedParticipant = run('__removedParticipant');
+    assert.ok(removedParticipant, 'participant rows should be removable');
+    els['#mf'].__m = {
+      requested_by: 'Dr. Follow-up', requested_date: '2026-10-22T09:30', service_id: '993', operation_date: '2026-10-23T10:00',
+      participants: [String(doctor.id)], form_type: 'English', patient_profile_condition: 'Stable patient', pre_op_diagnosis: 'Appendicitis',
+      procedure_indication: 'Abdominal pain', post_op_diagnosis: 'Appendectomy completed', anesthesia_types: ['General', 'Spinal'],
+      anesthesia_description: 'General anesthesia', preoperative_medications: 'Antibiotic prophylaxis', preparation_of_patient: 'NPO',
+      position_of_patient: 'Supine', incision_site: 'Right lower quadrant', description: 'Laparoscopic appendectomy',
+      assessment_before_closure: 'Hemostasis achieved', instruments_sponges_count: 'Correct', materials_input: 'Sutures',
+      closure_description: 'Closed in layers', estimation_blood_loss: '50 mL', blood_transfusion: 'Not required',
+      further_investigation: 'Histopathology', complications_prediction: 'None', post_op_plan: 'Monitor recovery'
+    };
+    await run(`$('#mf').onsubmit({preventDefault(){}})`);
+    const operation = run(`recs.find(r=>r.patient_id==${p.id}&&r.kind=='operation')`);
+    assert.ok(operation, ctx.__toast || 'operation record was not saved');
+    const operationData = JSON.parse(operation.data);
+    assert.equal(operation.title, 'Operation Service'); assert.equal(operation.date, '2026-10-23T10:00');
+    assert.deepEqual(operationData.anesthesia_types, ['General', 'Spinal']); assert.deepEqual(operationData.participants, [String(doctor.id)]);
+    assert.equal(operationData.description, 'Laparoscopic appendectomy'); assert.equal(operationData.post_op_plan, 'Monitor recovery');
+    run(`genForm(recs.find(r=>r.id==${operation.id}))`);
+    assert.ok(els['#mf'].innerHTML.includes('Edit Operation Request Form') && els['#mf'].innerHTML.includes('Laparoscopic appendectomy'), 'editing an operation should prefill saved details');
+    ok('operation request form follows the requested sections and saves editable operation details');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}');
 
     const newPatientModules = [
