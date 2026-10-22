@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const ExcelJS = require('exceljs');
 const QRCode = require('qrcode');
 const bwipjs = require('bwip-js');
+const { createWorker } = require('tesseract.js');
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env file */ }
 const { initDb, close, query, queryOne, queryAll, tx, RES, CLINIC, dataDir } = require('./db');
 const { hashPw, checkPw, sign, verify, initAuth } = require('./auth');
@@ -21,6 +22,7 @@ const PHOTO_RE = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
 const CORS = process.env.CORS_ORIGIN || '';
 const tzh = Number.isFinite(Number(process.env.TZ_OFFSET_HOURS)) ? Number(process.env.TZ_OFFSET_HOURS) : 7;
 const TZ = `${tzh >= 0 ? '+' : ''}${tzh} hours`;
+let ocrWorkerPromise = null;
 
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const bad = (m) => new HttpError(400, m);
@@ -74,7 +76,7 @@ function clean(name, body, partial, spec = RES[name]) {
       if (kind === 'j' && typeof v === 'object' && v !== null && !Array.isArray(v)) v = JSON.stringify(v);
       else if (typeof v !== 'string') v = v == null ? '' : String(v);
       v = v.trim();
-      const max = kind === 'j' ? 60000 : kind === 'x' ? (name === 'echo' && c === 'sections' ? 500000 : 10000) : 255;
+      const max = kind === 'j' ? 60000 : kind === 'x' ? (name === 'echo' && c === 'sections' ? 500000 : name === 'files' && c === 'content' ? 100000 : 10000) : 255;
       if (v.length > max) throw bad(`${c} is too long (max ${max})`);
       if (req && !v) throw bad(`${c} cannot be empty`);
       if (IMG.includes(c) && v && !PHOTO_RE.test(v)) throw bad(`${c} is not a valid picture filename`);
@@ -126,6 +128,24 @@ function clean(name, body, partial, spec = RES[name]) {
   if (name === 'records') {
     if ('kind' in out && !KINDS.includes(out.kind)) throw bad('kind is not valid');
     if ('color' in out && out.color && !/^#[0-9a-fA-F]{6}$/.test(out.color)) throw bad('color is not valid');
+  }
+  if (name === 'files' && 'content' in out) {
+    const sanitized = clean('echo', {
+      name: 'Sample file template',
+      sections: JSON.stringify([{ title: '', content: out.content, fields: [] }]),
+      fields: '[]',
+    }, false);
+    out.content = JSON.parse(sanitized.sections)[0].content.replace(/<img\b(?=[^>]*\bsrc="https?:\/\/)[^>]*>/gi, '');
+  }
+  if (name === 'expenses' && 'date' in out && out.date) {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(out.date) ? new Date(out.date + 'T00:00:00Z') : null;
+    if (!date || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== out.date) throw bad('date must be a valid date');
+  }
+  if (name === 'expenses' && 'unit_price' in out && 'quantity' in out) {
+    if (out.quantity < 1) throw bad('quantity must be at least 1');
+    const total = out.unit_price * out.quantity;
+    if (!Number.isSafeInteger(total) || total > 2e9) throw bad('expense total must be a whole KHR amount up to 2,000,000,000');
+    if ('amount' in out && out.amount !== total) throw bad('amount must equal unit_price multiplied by quantity');
   }
   if (name === 'echo') {
     for (const key of ['sections', 'fields']) {
@@ -337,6 +357,21 @@ async function importEchoTemplates(rows) {
   });
   return templates.length;
 }
+async function importDiagnoses(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('rows must contain 1–1,000 diagnoses');
+  const diagnoses = rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw bad('Each diagnosis must be an object');
+    const name = String(row.name ?? row.diagnosis ?? row.diagnosis_name ?? '').trim();
+    if (!name) throw bad('Each diagnosis must include a name');
+    return clean('diagnoses', { name }, false);
+  });
+  await tx(async (client) => {
+    for (const diagnosis of diagnoses) {
+      await client.query('INSERT INTO diagnoses(name) VALUES($1)', [diagnosis.name]);
+    }
+  });
+  return diagnoses.length;
+}
 
 const isEmail = (s) => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const userCount = async () => Number((await queryOne('SELECT COUNT(*)::int n FROM users'))?.n || 0);
@@ -531,8 +566,44 @@ async function api(req, res, url) {
     });
     return send(res, 201, sale);
   }
+  if (a === 'sales' && b && c === 'items' && d && m === 'DELETE') {
+    admin();
+    const saleId = Number(b), itemId = Number(d);
+    if (!Number.isInteger(saleId) || saleId < 1 || !Number.isInteger(itemId) || itemId < 1) throw bad('Invalid sale item');
+    await tx(async (client) => {
+      const item = (await client.query('SELECT medicine_id,qty FROM sale_items WHERE id=$1 AND sale_id=$2', [itemId, saleId])).rows[0];
+      if (!item) throw new HttpError(404, 'Medicine sale item not found');
+      await client.query('DELETE FROM sale_items WHERE id=$1', [itemId]);
+      if (item.medicine_id != null) await client.query('UPDATE medicines SET stock=stock+$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2', [item.qty, item.medicine_id]);
+      const totals = (await client.query('SELECT COUNT(*)::int AS count,COALESCE(SUM(qty*price),0)::int AS total FROM sale_items WHERE sale_id=$1', [saleId])).rows[0];
+      if (!totals.count) await client.query('DELETE FROM sales WHERE id=$1', [saleId]);
+      else await client.query('UPDATE sales SET total=$1 WHERE id=$2', [totals.total, saleId]);
+    });
+    return send(res, 200, { ok: true });
+  }
   if (a === 'sales' && !b && m === 'GET') {
-    return send(res, 200, await queryAll('SELECT * FROM sales ORDER BY id DESC LIMIT 200'));
+    const limit = Math.min(5000, Math.max(1, parseInt(url.searchParams.get('limit')) || 200));
+    return send(res, 200, await queryAll('SELECT * FROM sales ORDER BY id DESC LIMIT $1', [limit]));
+  }
+
+  if (a === 'reports' && b === 'medicine-sales' && m === 'GET') {
+    const from = url.searchParams.get('from') || null, to = url.searchParams.get('to') || null;
+    const validDate = (value) => {
+      if (!value) return true;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(value + 'T00:00:00Z');
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    };
+    if (!validDate(from) || !validDate(to)) throw bad('from and to must be valid dates');
+    if (from && to && from > to) throw bad('from date must not be after to date');
+    const limit = Math.min(5000, Math.max(1, parseInt(url.searchParams.get('limit')) || 5000));
+    const rows = await queryAll(`SELECT si.id AS item_id,si.sale_id,si.name,si.qty,si.price,(si.qty*si.price)::int AS total,s.method,
+      TO_CHAR(s.created_at + ($1 || ' hours')::interval, 'YYYY-MM-DD') AS date
+      FROM sale_items si JOIN sales s ON s.id=si.sale_id
+      WHERE ($2::text IS NULL OR TO_CHAR(s.created_at + ($1 || ' hours')::interval, 'YYYY-MM-DD') >= $2)
+        AND ($3::text IS NULL OR TO_CHAR(s.created_at + ($1 || ' hours')::interval, 'YYYY-MM-DD') <= $3)
+      ORDER BY s.created_at DESC,si.id DESC LIMIT $4`, [String(tzh), from, to, limit]);
+    return send(res, 200, rows);
   }
 
   if (a === 'reports' && b === 'daily' && m === 'GET') {
@@ -567,6 +638,28 @@ async function api(req, res, url) {
     fs.mkdirSync(UPLOADS, { recursive: true });
     fs.writeFileSync(path.join(UPLOADS, name), buf);
     return send(res, 201, { photo: name });
+  }
+  if (a === 'ocr' && !b && m === 'POST') {
+    const type = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[type];
+    if (!ext) throw new HttpError(415, 'Use a JPG, PNG or WebP picture');
+    const image = await readRaw(req, 2e6);
+    const validImage = ext === 'jpg' ? image.length > 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff
+      : ext === 'png' ? image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      : image.subarray(0, 4).toString('latin1') === 'RIFF' && image.subarray(8, 12).toString('latin1') === 'WEBP';
+    if (!validImage) throw bad('File is not a valid picture');
+    let worker;
+    try {
+      if (!ocrWorkerPromise) ocrWorkerPromise = createWorker(['eng', 'khm'], 1, { cachePath: path.join(dataDir, 'tessdata') });
+      worker = await ocrWorkerPromise;
+    } catch (error) {
+      ocrWorkerPromise = null;
+      throw new HttpError(503, `OCR is unavailable: ${error.message}`);
+    }
+    try {
+      const result = await worker.recognize(image);
+      return send(res, 200, { text: String(result.data.text || '').trim() });
+    } catch (error) { throw new HttpError(422, `Image OCR failed: ${error.message}`); }
   }
 
   if (a === 'services' && b === 'import' && m === 'POST') {
@@ -664,6 +757,53 @@ async function api(req, res, url) {
       rows.push(row);
     }
     return send(res, 201, { imported: await importLabs(rows) });
+  }
+
+  if (a === 'diagnoses' && b === 'import-xlsx' && m === 'POST') {
+    const buffer = await readRaw(req, 1e6, 'Import file is too large (max 1 MB)');
+    const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const isCsv = contentType === 'text/csv' || contentType === 'application/csv';
+    let rows = [];
+    if (isCsv) {
+      const text = buffer.toString('utf8');
+      const split = (line) => { const cells = []; let cell = ''; let quote = false; for (let i = 0; i < line.length; i++) { const ch = line[i]; if (ch === '"') { if (quote && line[i + 1] === '"') { cell += '"'; i++; } else quote = !quote; } else if (ch === ',' && !quote) { cells.push(cell); cell = ''; } else if (ch === '\r') continue; else { cell += ch; } } cells.push(cell); return cells; };
+      const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      if (!lines.length) throw bad('CSV must include a header and at least one diagnosis');
+      const headers = split(lines[0]).map((header) => String(header ?? '').trim().toLowerCase());
+      const nameIndex = headers.findIndex((header) => ['name', 'diagnosis', 'diagnosisname'].includes(header));
+      if (nameIndex < 0) throw bad('CSV needs a name column');
+      for (let index = 1; index < lines.length; index++) {
+        const values = split(lines[index]);
+        if (!values.some((value) => String(value || '').trim())) continue;
+        const row = { name: values[nameIndex] ?? '' };
+        for (let headerIndex = 0; headerIndex < headers.length; headerIndex++) {
+          const key = headers[headerIndex];
+          if (key && headerIndex < values.length) row[key] = values[headerIndex];
+        }
+        rows.push(row);
+      }
+    } else {
+      let workbook;
+      try { workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(buffer); }
+      catch { throw bad('Invalid Excel workbook'); }
+      const sheet = workbook.worksheets[0];
+      if (!sheet || sheet.rowCount < 2) throw bad('Excel workbook must include a header and at least one diagnosis');
+      const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      const headers = sheet.getRow(1).values.slice(1).map(normalize);
+      const find = (...names) => headers.findIndex((header) => names.includes(header));
+      const columns = { name: find('name', 'diagnosis', 'diagnosisname') };
+      if (columns.name < 0) throw bad('Excel workbook needs a diagnosis name column');
+      for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+        const values = sheet.getRow(rowNumber).values.slice(1);
+        if (!values.some((value) => value != null && String(value).trim())) continue;
+        const row = { rowNumber };
+        for (const [key, index] of Object.entries(columns)) {
+          if (index >= 0 && values[index] != null) row[key] = values[index];
+        }
+        rows.push(row);
+      }
+    }
+    return send(res, 201, { imported: await importDiagnoses(rows) });
   }
 
   if (a === 'echo' && b === 'import-xlsx' && m === 'POST') {

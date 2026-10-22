@@ -10,7 +10,7 @@ const { close } = require('./db');
 
 server.listen(0, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${server.address().port}`;
-  let token = null;
+  let token = null, medicineSaleItem = null, medicineSaleId = null;
   const call = async (method, url, body, tk = token) => {
     const r = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...(tk ? { Authorization: 'Bearer ' + tk } : {}) }, body: body ? JSON.stringify(body) : undefined });
     return { status: r.status, body: await r.json().catch(() => null), headers: r.headers };
@@ -35,6 +35,15 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('GET', '/api/patients?q=sok')).body.length, 1); ok('search works');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { phone: '012 345 678' })).body.phone, '012 345 678'); ok('update patient');
     assert.equal((await call('GET', '/api/patients/99999')).status, 404); ok('404 for missing record');
+    const sampleFile = await call('POST', '/api/files', { name: 'Clinic letter', content: '<p onclick="x()">Clinic <strong>hours</strong></p><script>alert(1)</script><img src="javascript:alert(1)">' });
+    assert.equal(sampleFile.status, 201);
+    assert.equal(sampleFile.body.content, '<p>Clinic <strong>hours</strong></p>');
+    assert.equal((await call('PUT', `/api/files/${sampleFile.body.id}`, { content: '<p>Updated safely</p>' })).body.content, '<p>Updated safely</p>');
+    assert.equal((await call('POST', '/api/ocr', {}, null)).status, 401);
+    assert.equal((await call('POST', '/api/ocr', {})).status, 415);
+    const invalidOcrImage = await fetch(base + '/api/ocr', { method: 'POST', headers: { 'Content-Type': 'image/png', Authorization: 'Bearer ' + token }, body: Buffer.from('not an image') });
+    assert.equal(invalidOcrImage.status, 400);
+    ok('sample file templates save sanitized rich text and OCR rejects unauthenticated or invalid images');
     const service = await call('POST', '/api/services', { name: 'Facial care', price: '60000', description: 'សេវាថែរក្សាផ្ទៃមុខ' });
     assert.equal(service.status, 201); assert.equal(service.body.price, 60000); assert.equal(service.body.description, 'សេវាថែរក្សាផ្ទៃមុខ');
     assert.equal((await call('PUT', `/api/services/${service.body.id}`, { description: 'ការពិពណ៌នាថ្មី' })).body.description, 'ការពិពណ៌នាថ្មី');
@@ -70,6 +79,37 @@ server.listen(0, '127.0.0.1', async () => {
     });
     assert.equal(xlsxImport.status, 201); assert.equal((await xlsxImport.json()).imported, 1);
     assert.equal((await call('GET', '/api/services?q=Exported')).body[0].description, 'Description included'); ok('real Excel export includes service descriptions and imports back into Services');
+    const expense = await call('POST', '/api/expenses', { name: 'Clinic supplies', category: 'Supplies', date: '2026-10-22', unit_price: 2000, quantity: 2, amount: 4000, notes: 'Monthly purchase' });
+    assert.equal(expense.status, 201); assert.equal(expense.body.amount, 4000);
+    const savedExpense = (await call('GET', '/api/expenses?limit=5000')).body[0];
+    assert.equal(savedExpense.name, 'Clinic supplies');
+    assert.equal(savedExpense.unit_price, 2000);
+    assert.equal(savedExpense.quantity, 2);
+    assert.equal(savedExpense.notes, 'Monthly purchase');
+    assert.equal((await call('POST', '/api/expenses', { name: 'Invalid date', date: '2026-02-30', amount: 100 })).status, 400);
+    assert.equal((await call('POST', '/api/expenses', { name: 'Mismatched total', date: '2026-10-22', unit_price: 2000, quantity: 2, amount: 3000 })).status, 400);
+    assert.equal((await call('DELETE', `/api/expenses/${expense.body.id}`, null, token)).status, 200);
+    ok('report expenses can be saved, listed, date-validated and deleted');
+
+    const diagnosisWorkbook = new ExcelJS.Workbook();
+    const diagnosisSheet = diagnosisWorkbook.addWorksheet('Diagnoses');
+    diagnosisSheet.addRow(['Diagnosis Name']);
+    diagnosisSheet.addRow(['Imported diagnosis from Excel']);
+    const diagnosisXlsx = await fetch(base + '/api/diagnoses/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Authorization: 'Bearer ' + token },
+      body: Buffer.from(await diagnosisWorkbook.xlsx.writeBuffer()),
+    });
+    assert.equal(diagnosisXlsx.status, 201); assert.equal((await diagnosisXlsx.json()).imported, 1);
+    assert.equal((await call('GET', '/api/diagnoses?q=Imported diagnosis from Excel')).body[0].name, 'Imported diagnosis from Excel');
+    const diagnosisCsv = await fetch(base + '/api/diagnoses/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv; charset=utf-8', Authorization: 'Bearer ' + token },
+      body: 'diagnosis\n"Imported, quoted diagnosis"\n',
+    });
+    assert.equal(diagnosisCsv.status, 201); assert.equal((await diagnosisCsv.json()).imported, 1);
+    assert.equal((await call('GET', '/api/diagnoses?q=' + encodeURIComponent('Imported, quoted diagnosis'))).body[0].name, 'Imported, quoted diagnosis');
+    ok('diagnosis imports accept Excel workbooks and quoted CSV rows');
 
     const med = (await call('POST', '/api/medicines', { name: 'Paracetamol', price: 500, stock: 10 })).body;
     const detailedMedicine = await call('POST', '/api/medicines', {
@@ -127,6 +167,16 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('GET', '/api/medicines?q=Broken price')).body.length, 0); ok('invalid medicine prices report their Excel row and leave imports unchanged');
     let s = await call('POST', '/api/sales', { method: 'Cash', items: [{ medicine_id: med.id, qty: 4 }] });
     assert.equal(s.status, 201); assert.equal(s.body.total, 2000); ok('sale uses DB price and totals correctly');
+    const medicineReport = await call('GET', '/api/reports/medicine-sales?limit=5000');
+    assert.equal(medicineReport.status, 200);
+    assert.ok(medicineReport.body.some(item => item.name === 'Paracetamol' && item.qty === 4 && item.total === 2000));
+    medicineSaleItem = medicineReport.body.find(item => item.name === 'Paracetamol' && item.qty === 4);
+    medicineSaleId = medicineSaleItem.sale_id;
+    assert.equal((await call('GET', '/api/reports/medicine-sales?from=2026-02-30')).status, 400);
+    assert.equal((await call('GET', '/api/reports/medicine-sales?from=2026-99-99')).status, 400);
+    const filteredMedicineReport = await call('GET', `/api/reports/medicine-sales?from=${medicineSaleItem.date}&to=${medicineSaleItem.date}`);
+    assert.ok(filteredMedicineReport.body.some(item => item.item_id === medicineSaleItem.item_id));
+    ok('medicine sales report returns itemized sale rows with date filters');
     assert.equal((await call('GET', `/api/medicines/${med.id}`)).body.stock, 6); ok('stock decremented');
     s = await call('POST', '/api/sales', { method: 'Cash', items: [{ medicine_id: med.id, qty: 7 }] });
     assert.equal(s.status, 409); assert.equal((await call('GET', `/api/medicines/${med.id}`)).body.stock, 6); ok('oversell blocked, stock unchanged');
@@ -162,6 +212,11 @@ server.listen(0, '127.0.0.1', async () => {
     const staff = await call('POST', '/api/users', { email: 'nurse@clinic.test', password: 'password123', role: 'staff' }); assert.equal(staff.status, 201);
     const st = (await call('POST', '/api/auth/login', { email: 'nurse@clinic.test', password: 'password123' })).body.token;
     assert.equal((await call('POST', '/api/symptoms', { name: 'Cough' }, st)).status, 201); ok('staff can create');
+    assert.equal((await call('DELETE', `/api/sales/${medicineSaleId}/items/${medicineSaleItem.item_id}`, null, st)).status, 403);
+    assert.equal((await call('DELETE', `/api/sales/${medicineSaleId}/items/${medicineSaleItem.item_id}`)).status, 200);
+    assert.equal((await call('GET', `/api/medicines/${med.id}`)).body.stock, 10);
+    assert.equal((await call('GET', '/api/reports/medicine-sales')).body.some(item => item.item_id === medicineSaleItem.item_id), false);
+    ok('admin can delete a medicine sale row and stock is restored; staff cannot');
     assert.equal((await call('DELETE', `/api/patients/${p.body.id}`, null, st)).status, 403); ok('staff cannot delete');
     assert.equal((await call('GET', '/api/users', null, st)).status, 403); ok('staff cannot list users');
     const cl0 = (await call('GET', '/api/clinic')).body; assert.equal(cl0.currency, 'KHR'); assert.equal(cl0.rate, 4000); assert.equal(cl0.show_name, 1); ok('clinic settings have defaults');
