@@ -264,7 +264,16 @@ server.listen(0, '127.0.0.1', async () => {
     await run('__save({__m:{"discount":"0","discount_currency":"KHR","received":"12500","method":"Cash","payment_date":"2026-10-14","receiver_name":"Clinic User"}})');
     assert.equal(run(`patientDue(${baby.id})`), 0);
     html = run('billPanel()');
-    assert.ok(html.includes('Ref: PAY-') && html.includes('Items:</span><span>1</span>') && html.includes('Total Paid') && html.includes('KHR 12,500'));
+    assert.ok(html.includes('class="bill-payment-table"') && html.includes('<th>Date</th>') && html.includes('<th>Method</th>') && html.includes('<td>1</td>') && html.includes('Total Paid') && html.includes('KHR 12,500'));
+    assert.equal(run(`paidHistoryTable([{id:1,date:'2026-10-14',data:JSON.stringify({amount:12500})},{id:2,date:'2026-10-15',data:JSON.stringify({amount:2500})}],[]).total`), 15000, 'Paid History overall total should include each receipt amount');
+    assert.ok(run(`paidHistoryTable([{id:1,data:JSON.stringify({amount:12500})},{id:2,data:JSON.stringify({amount:2500})}],[]).html`).includes('KHR 15,000'), 'Paid History table footer should show the sum of all receipts');
+    assert.ok(html.includes('data-a="paidview"') && html.includes('aria-label="Switch to cards view"'), 'Paid History should offer a view toggle icon');
+    ctx.__paidPanel = { innerHTML: '' };
+    run('pAct("paidview","","",{closest:()=>__paidPanel})');
+    assert.equal(run('paidHistoryView'), 'cards'); assert.ok(ctx.__paidPanel.innerHTML.includes('class="bill-payment-cards"') && ctx.__paidPanel.innerHTML.includes('PAY-'), 'view toggle should show receipt cards');
+    run('pAct("paidview","","",{closest:()=>__paidPanel})');
+    assert.equal(run('paidHistoryView'), 'table'); assert.ok(ctx.__paidPanel.innerHTML.includes('class="bill-payment-table-wrap"'), 'view toggle should switch back to the receipt table');
+    delete ctx.__paidPanel;
     ok('investigation services appear as unpaid billing line items and update the patient balance');
     await run(`openPatient(${p.id})`);
 
@@ -447,10 +456,6 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(run('payAllDiscountCalculation([{price:100},{price:200}],[1],30,"KHR",10,"KHR").finalTotal'), 260);
     assert.equal(run('payAllDiscountAllocation([{price:100},{price:200}],[1],30)[1]'), 30);
     run('payAllContext.selectedIndexes=[0];payAllContext.discountInput=10000;payAllContext.discountCurrency="KHR"');
-    els['#mf'].__m = { all_discount: '5000', all_discount_currency: 'KHR', received: '64999', method: 'Bank', payment_date: '2026-10-05', receiver_name: 'Cashier One' };
-    await run('$("#mf").onsubmit({preventDefault(){}})');
-    assert.equal(run(`recs.filter(r=>r.patient_id==${p.id}&&r.kind=="payment").length`), 0);
-    assert.ok(ctx.__toast.includes('KHR 65,000'), 'underpayment should state the required final total');
     els['#mf'].__m = { all_discount: '5000', all_discount_currency: 'KHR', received: '65000', method: 'Bank', payment_date: '2026-10-05', receiver_name: 'Cashier One' }; await run('$("#mf").onsubmit({preventDefault(){}})');
     assert.equal(run('billTotals(recs).bal'), 0); assert.equal(run('jd(recs.find(r=>r.kind=="payment")).method'), 'Bank');
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).amount'), 65000);
@@ -458,18 +463,46 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).discount'), 15000);
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).discount_item'), 10000);
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).discount_all'), 5000);
+    assert.match(run('jd(recs.find(r=>r.kind=="payment")).paid_at'), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).discount_items[0].name'), run('payAllContext.items[0].name'));
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).items.reduce((sum,item)=>sum+item.discount_item,0)'), 10000);
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).items.reduce((sum,item)=>sum+item.discount_all,0)'), 5000);
     assert.equal(run('jd(recs.find(r=>r.kind=="payment")).receiver_name'), 'Cashier One');
     html = run('billPanel()'); const paidId = run('recs.find(r=>r.kind=="payment").id');
     assert.ok(html.includes('KHR 65,000') && /data-a="payall" disabled/.test(html) && /data-a="recpay" disabled/.test(html));
-    assert.ok(html.includes(`data-a="payreceipt:${paidId}"`)); run(`D.clinic.banner='clinic-banner.jpg';pAct('payreceipt','${paidId}')`);
+    assert.ok(html.includes(`data-a="payreceipt:${paidId}"`) && html.includes('bill-payment-date') && html.includes(run('jd(recs.find(r=>r.kind=="payment")).paid_at.slice(11,16)'))); run(`D.clinic.banner='clinic-banner.jpg';pAct('payreceipt','${paidId}')`);
     assert.equal(ctx.__pd[0], ''); assert.ok(ctx.__pd[1].includes('payment-receipt') && ctx.__pd[1].includes('DETAILED INVOICE') && ctx.__pd[1].includes('Test Patient') && ctx.__pd[1].includes('PAY-' + paidId) && ctx.__pd[1].includes('Bank') && ctx.__pd[1].includes('KHR 80,000') && ctx.__pd[1].includes('KHR 65,000') && ctx.__pd[1].includes('Discount') && ctx.__pd[1].includes('Grand Total') && ctx.__pd[1].includes('Cashier One') && ctx.__pd[1].includes('អ្នកទទួលប្រាក់ / Received by') && ctx.__pd[1].includes(`${run('API_BASE')}/uploads/clinic-banner.jpg`) && ctx.__pd[1].includes('payment-receipt-signatures'));
     run("D.clinic.banner=''");
     assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /\.payment-receipt-table th,\s*\.payment-receipt-table td\s*\{[^}]*font-size:\s*9pt;/s, 'payment receipt should use the compact invoice table styling');
     ok('paid billing history can print payment receipts; payment actions are disabled when no balance remains');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
+
+    // ---- Partial Pay All and follow-up payment ----
+    ctx.__partialPatient = await run(`api('POST','patients',{name:'Partial Payment Test',type:'OPD'})`);
+    await run(`api('POST','records',{patient_id:__partialPatient.id,kind:'investigation',data:{items:[{name:'Service One',price:120000,quantity:1},{name:'Service Two',price:80000,quantity:1}]}})`);
+    run('openForm=__nativeOpenForm'); await run('load()'); await run('openPatient(__partialPatient.id)'); await run('pAct("payall")');
+    assert.ok(els['#mf'].innerHTML.includes('Remaining balance in Unpaid') && els['#mf'].innerHTML.includes('Discounts apply only when the full final total is paid.'));
+    const payAllControls = { '[name="all_discount"]': { value: '0' }, '[name="all_discount_currency"]': { value: 'KHR' }, '[name="received"]': { value: '150000' } };
+    els['#mf'].querySelector = selector => payAllControls[selector] || el();
+    run('payAllRefresh()');
+    assert.equal(els['#payall-remaining-balance'].textContent, 'KHR 50,000', 'Pay All should preview the remaining unpaid balance');
+    els['#mf'].__m = { all_discount: '0', all_discount_currency: 'KHR', received: '150000', method: 'Cash', payment_date: '2026-10-23', receiver_name: 'Clinic User' };
+    await run('$("#mf").onsubmit({preventDefault(){}})');
+    assert.equal(run('billTotals(recs).bal'), 50000, 'a partial Pay All payment should leave its remainder unpaid');
+    assert.equal(run('jd(recs.find(r=>r.kind=="payment")).applied_amount'), 150000);
+    assert.equal(run('jd(recs.find(r=>r.kind=="payment")).remaining_balance'), 50000);
+    assert.equal(run('jd(recs.find(r=>r.kind=="payment")).discount'), 0);
+    assert.ok(run('billPanel()').includes('KHR 50,000'), 'remaining amount should be shown in Unpaid after partial payment');
+    const partialPaymentId = run('recs.find(r=>r.kind=="payment").id');
+    run(`pAct('payreceipt','${partialPaymentId}')`);
+    assert.ok(ctx.__pd[1].includes('Remaining Balance') && ctx.__pd[1].includes('KHR 50,000'), 'partial payment receipt should show the remaining amount');
+    assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /\.payall-balance\s*\{[^}]*background:\s*#f0fdf4;/s, 'remaining balance should be visually distinct in Pay All');
+    await run('pAct("payall")');
+    els['#mf'].__m = { all_discount: '0', all_discount_currency: 'KHR', received: '50000', method: 'Cash', payment_date: '2026-10-24', receiver_name: 'Clinic User' };
+    await run('$("#mf").onsubmit({preventDefault(){}})');
+    assert.equal(run('billTotals(recs).bal'), 0, 'the patient should be able to pay the remaining balance on a later visit');
+    ok('Pay All accepts partial payments, displays the Unpaid remainder, and accepts a later payment');
+    await run(`openPatient(${p.id})`); run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
 
     // ---- Medicines list and Add Medicine form ----
     run('rt="pos";medicineFormOpen=false;medicineFormReturnPage=null');
@@ -887,7 +920,7 @@ server.listen(0, '127.0.0.1', async () => {
     ok('IPD treatment action opens the Treatment Follow-up interface');
     await run(`(async()=>{pAct('ipdbill','${p.id}');await new Promise(r=>setTimeout(r,100))})()`);
     const billingModal = els['#mf'].innerHTML;
-    assert.ok(billingModal.includes('Test Patient') && billingModal.includes('Billing history') && billingModal.includes('No unpaid bills found.') && billingModal.includes('Paid History') && billingModal.includes(`data-a="payreceipt:${paidId}"`));
+    assert.ok(billingModal.includes('Test Patient') && billingModal.includes('Billing history') && billingModal.includes('No unpaid bills found.') && billingModal.includes('Paid History') && billingModal.includes('bill-payment-table') && billingModal.includes('data-a="paidview"') && billingModal.includes('Total Paid') && billingModal.includes(`data-a="payreceipt:${paidId}"`));
     run(`pAct('payreceipt','${paidId}')`);
     assert.equal(ctx.__pd[0], ''); assert.ok(ctx.__pd[1].includes('DETAILED INVOICE') && ctx.__pd[1].includes('KHR 80,000'));
     ok('clicking Paid in IPD opens the billing-history modal with payment receipt actions');
