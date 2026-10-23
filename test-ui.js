@@ -930,12 +930,13 @@ server.listen(0, '127.0.0.1', async () => {
 
     // patient name is clickable in the list; calendar adds an appointment through the modal
     run('rt="pt"'); assert.ok(run('R.pt()').includes('data-a="open:') && run('R.pt()').includes('data-a="reg"')); ok('patient list opens patient file and registration form');
-    html = run('R.pt()'); assert.ok(html.includes(`data-a="ptbed:${p.id}"`), 'patient row is missing the bed information button');
+    html = run('R.pt()'); assert.ok(html.includes(`data-a="ptadmit:${p.id}" title="Admit to IPD">OPD</span>`), 'patient row should make the IPD/OPD status clickable');
     assert.ok(html.includes('class="card patient-table-wrap"'), 'patient list should use the responsive full-width table wrapper');
     assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /table\.ptb\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*table-layout:\s*fixed;/s, 'patient table should fit the available width without a forced minimum width');
     assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /\.patient-table-wrap\s*\{[^}]*overflow-x:\s*hidden;/s, 'patient list should not require horizontal scrolling');
-    await run(`api('POST','ipd',{name:'Test Patient',code:'${p.id}',room:'',paid:0,out:0})`); await run('load()');
+    await run(`api('POST','ipd',{name:'Test Patient',code:'${p.id}',room:'',paid:0,out:0})`); await run(`api('PUT','patients/${p.id}',{type:'IPD'})`); await run('load()');
     const ipdId = run(`D.ipd.find(x=>x.code=='${p.id}').id`), ipdHtml = run(`ipdRow(D.ipd.find(x=>x.code=='${p.id}'))`);
+    assert.ok(run('ipdPage(false)').includes('<th>IPD/OPD</th>') && ipdHtml.includes(`data-a="ipdreturn:${p.id}"`) && ipdHtml.includes('>IPD</button>') && run(`ipdRow({code:'missing-patient',name:'Legacy patient',out:0})`).includes('>IPD</span>'), 'IPD table should make an active IPD status actionable and keep unlinked admissions labeled');
     assert.ok(ipdHtml.includes(`data-a="ipdbill:${p.id}"`), 'IPD billing status should open billing history');
     assert.ok(ipdHtml.includes(`data-a="ipdtreat:${ipdId}"`), 'IPD treatment should open treatment follow-up');
     run('openForm=__nativeOpenForm');
@@ -956,6 +957,13 @@ server.listen(0, '127.0.0.1', async () => {
     const savedIpd = run(`D.ipd.find(x=>x.code=='${p.id}')`);
     assert.equal(savedIpd.room, 'A-01'); assert.equal(savedIpd.bed, 'B-02');
     assert.ok(run("tp('ipd')").includes('A-01') && run("tp('ipd')").includes('B-02'));
+    await run(`api('PUT','patients/${p.id}',{type:'IPD'})`); await run('load()');
+    assert.ok(run(`cellsFull(D.pt.find(x=>x.id==${p.id}),0,true).type`).includes(`data-a="ptadmit:${p.id}" title="Discharge to OPD">IPD</span>`), 'clicking IPD status should offer discharge back to OPD');
+    run('rt="ipd"');
+    await run(`(async()=>{pAct('ipdreturn','${p.id}');await new Promise(r=>setTimeout(r,100))})()`);
+    assert.equal(run(`D.pt.find(x=>x.id==${p.id}).type`), 'OPD'); assert.equal(run(`D.ipd.find(x=>x.code=='${p.id}'&&!x.out)`), undefined, 'discharging from the patient list should close the active IPD admission');
+    assert.equal(run('rt'), 'pt', 'clicking IPD status in the IPD table should return to the Patient list');
+    ok('clicking IPD status in the IPD table returns the patient to OPD and opens the Patient list');
     ok('patient bed update synchronizes the active IPD record and IPD list');
     console.log('\nAll UI tests passed.'); process.exitCode = 0;
   } catch (e) { console.error('\nFAILED:', e.stack || e.message); process.exitCode = 1; }
