@@ -152,7 +152,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(!run('R.bill()').includes('Test report expense'));
     run(`reportFrom='';reportTo='';reportRange=''`);
     ok('financial report filters and displays saved expenses with summary and print/export actions');
-    for (const page of ['ap', 'ipd', 'cur', 'med', 'set']) {
+    for (const page of [...Object.keys(run('M')), 'set']) {
       listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'go:' + page } }) }, preventDefault() {} });
       assert.equal(sessionValues.currentPage, page); assert.equal(location.hash, '#' + page);
       sessionValues.currentPage = '';
@@ -167,7 +167,12 @@ server.listen(0, '127.0.0.1', async () => {
       assert.equal(run('rt'), page, `${page} must be accepted as a valid saved route despite using the generic table renderer`);
     }
     location.hash = '#ipd'; windowListeners.hashchange[0](); assert.equal(run('rt'), 'ipd', 'browser history changes should switch to the route in the URL');
-    run(`cal.mode='month';rt='dash'`);
+    run(`rt='ap';tab='Unpaid';cal={mode:'week',d:new Date('2026-10-20T00:00:00Z'),list:false};render()`);
+    run(`tab='OPD';cal={mode:'month',d:new Date(),list:false};restorePageState()`);
+    assert.equal(run('tab'), 'Unpaid', 'patient list tab should restore after refresh');
+    assert.equal(run('cal.mode'), 'week', 'appointment calendar view should restore after refresh');
+    assert.equal(run('cal.d.toISOString()'), '2026-10-20T00:00:00.000Z', 'appointment calendar date should restore after refresh');
+    run(`cal.mode='month';tab='OPD';rt='dash'`);
     sessionValues.currentPage = 'unknown'; location.hash = '#unknown'; run(`rt='dash';restorePage()`); assert.equal(run('rt'), 'dash');
     ok('refresh restores Appointments, IPD, Current IPD, and other pages from this browser tab');
 
@@ -182,6 +187,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(doctorCards.includes(`data-a="doctorhistory:${doctor.id}"`) && doctorCards.includes('title="Doctor history"'), 'doctor card should include history action');
     run(`openDoctorHistory('${doctor.id}')`);
     assert.equal(run('doctorTab'), 'timeline'); assert.ok(run('R.dr()').includes('Employment Timeline'), 'history action should open the doctor timeline');
+    run(`openDoctorProfile(${doctor.id})`); location.hash = '#dr'; run('doctorProfileId=null;restorePage();restorePageState()');
+    assert.equal(run('rt'), 'dr'); assert.equal(run('doctorProfileId'), doctor.id, 'refresh should restore the selected doctor profile');
+    assert.ok(run('R.dr()').includes('Total Net Salary Paid'), 'restored doctor route should render its profile view');
     run(`doctorForm(D.dr.indexOf(D.dr.find(x=>x.code=='S002')))`);
     assert.ok(els['#mf'].innerHTML.includes('Edit Doctor') && els['#mf'].innerHTML.includes('Mon-Fri'));
     run(`openDoctorProfile(${doctor.id})`); let doctorProfile = run('R.dr()');
@@ -206,6 +214,9 @@ server.listen(0, '127.0.0.1', async () => {
 
     // patient file
     await run(`openPatient(${p.id})`); assert.equal(run('rt'), 'pd');
+    assert.equal(sessionValues.currentPage, 'patient'); assert.equal(sessionValues.currentPatientId, String(p.id));
+    location.hash = '#patient'; run(`rt='pt';restorePage()`); assert.equal(run('rt'), 'pd', 'patient-file route should restore instead of the patient list');
+    await run('restorePatientPage()'); assert.equal(run('pdId'), p.id); assert.equal(run('ptab'), 'vitals', 'patient file should restore its selected patient tab');
     let html = run('R.pd()'); for (const must of ['Test Patient', 'Vital signs', 'Medical Record', 'MD History', 'BEU', 'Treatment Schedule', 'Consultation', 'Operation', 'ស្នើសុំពិនិត្យ', 'Homecare', 'Allergy History', 'Vaccination', 'Referral', 'Diagnosis History', 'Lab Orders', 'Imaging Orders', 'NSSF ID', 'National ID', 'id="pdd"']) assert.ok(html.includes(must), 'patient file missing ' + must);
     assert.equal(run('PT.length'), 23, 'Patient Management should show exactly 23 sections');
     ok('patient file displays all 23 Patient Management sections');
@@ -428,8 +439,12 @@ server.listen(0, '127.0.0.1', async () => {
     ctx.__f = { __m: { date: '2026-10-21', amount: '7.50', treatment_type: 'Peel', diagnosis: 'Acne', notes: 'Peel session 2', schedule_type: 'Standard', billable: '1', done: '1' } }; run('schForm()'); await run('__save(__f)');
     assert.equal(run('schRows().length'), 2); assert.equal(run('schTotal()'), 80000); assert.equal(run(`patientDue(${p.id})`), 80000);
     assert.equal(run("billTotals([{kind:'schedule',data:JSON.stringify({amount:4000,billable:0})}]).ch"), 0);
-    assert.ok(run(`ipdRow({code:'${p.id}',name:'Test Patient',adm:'2026-10-14'})`).includes(`data-a="ptpay:${p.id}"`));
+    assert.ok(run(`ipdRow({code:'${p.id}',name:'Test Patient',adm:'2026-10-14'})`).includes(`data-a="ipdbill:${p.id}"`), 'IPD unpaid balance should open billing history before recording a payment');
     html = run('recPanel()'); assert.ok(html.includes('Peel session 1') && html.includes('80,000')); ok('schedule charges calculate the patient balance used by IPD billing status');
+    await run(`openIpdBilling(${p.id})`);
+    const unpaidIpdBilling = els['#mf'].innerHTML;
+    assert.ok(unpaidIpdBilling.includes('Billing history') && unpaidIpdBilling.includes('Treatment Charges') && unpaidIpdBilling.includes('Total Unpaid Amount') && unpaidIpdBilling.includes('KHR 80,000') && unpaidIpdBilling.includes('data-a="recpay"') && unpaidIpdBilling.includes('data-a="payall"') && unpaidIpdBilling.includes('Paid History'), 'IPD unpaid balance should open the full billing-history popup with payment actions');
+    ok('IPD unpaid billing opens the screenshot-style history popup with Record payment and Pay All');
     const rid = run('schRows()[0].id'); run(`pAct('schdone','${rid}')`); await new Promise((r) => setTimeout(r, 300)); assert.equal(JSON.parse(run('schRows()[0]').data).done, 1); ok('Done tick can be toggled');
     await run(`api('POST','records',{patient_id:pdId,kind:'schedulenote',title:'Treatment2'})`); await run('loadRecs()'); assert.ok(run('schNames()').includes('Treatment2')); run('sch="Treatment2"'); assert.equal(run('schRows().length'), 0); assert.ok(run('recPanel()').includes('Treatment2')); ok('a second schedule (Treatment2) is a separate tab with its own rows');
     run('schForm()'); ctx.__f = { __m: { date: '2026-10-22', amount: '10', treatment_type: 'Free follow-up', diagnosis: 'Acne', notes: 'Not billed', schedule_type: 'Treatment2', billable: null, done: null } }; await run('__save(__f)');
@@ -442,6 +457,9 @@ server.listen(0, '127.0.0.1', async () => {
     await run(`openPatient(${p.id})`); run('ptab="billing"'); html = run('recPanel()'); assert.ok(html.includes('data-a="payall"') && html.includes('Pay All') && html.includes('KHR 80,000'));
     run('openForm=__nativeOpenForm'); await run('pAct("payall")');
     for (const control of ['payall-items', 'name="all_discount"', 'name="all_discount_currency"', 'name="method"', 'name="payment_date"', 'name="received"', 'name="receiver_name"', 'payall-discount-open', 'payall-qr', 'payall-print:compact', 'payall-shortcut:100000', 'Confirm payment', 'បញ្ចុះតម្លៃគ្រប់សេវា / Discount all services', 'បញ្ចុះតម្លៃតាមសេវាដែលបានជ្រើសរើស / Discount selected services', 'តម្លៃសរុប / Total price', 'តម្លៃត្រូវបង់ / Final total', 'វិធីទូទាត់ / Payment method', 'សាច់ប្រាក់ / Cash', 'ធនាគារ / Bank', 'ឈ្មោះអ្នកទទួលប្រាក់ / Received by', 'បញ្ជាក់ការទូទាត់ / Confirm payment']) assert.ok(els['#mf'].innerHTML.includes(control), 'Pay All dialog missing bilingual discount/payment content: ' + control);
+    await run(`(async()=>{pAct('ptpay','${p.id}');await new Promise(r=>setTimeout(r,100))})()`);
+    assert.ok(els['#mf'].innerHTML.includes('ទូទាត់ប្រាក់ / Pay All') && els['#mf'].innerHTML.includes('payall-items') && els['#mf'].innerHTML.includes('Confirm payment'), 'Patient list Unpaid action should open the bilingual Pay All dialog');
+    await run('pAct("payall")');
     assert.ok(!els['#mf'].innerHTML.includes('ប្រាក់អាប់') && !els['#mf'].innerHTML.includes('name="change"'), 'Pay All form should not show a Change field');
     run('payAllContext.draftSelectedIndexes=[];payAllContext.draftDiscountInput=0;payAllContext.draftDiscountCurrency="KHR"');
     const discountModal = run('payAllDiscountModalHtml()');
@@ -563,6 +581,8 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(run('medicineViewId'), String(medicine.id));
     const medicineDetail=run('R.med()');
     for (const detail of ['medicine-detail', 'Back to Medicines', 'Medicine ID:', 'Composition', '500mg capsule', 'Sales units and prices', 'Tablet', 'KHR 5,000', 'Inventory dates', '2027-06-30']) assert.ok(medicineDetail.includes(detail), 'Medicine detail view missing ' + detail);
+    location.hash = '#med'; run('medicineViewId=null;restorePage();restorePageState()');
+    assert.equal(run('medicineViewId'), String(medicine.id), 'refresh should restore the selected medicine detail view');
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medback' } }) }, preventDefault() {} });
     assert.equal(run('medicineViewId'), null);
     listeners.click[0]({ target: { closest: () => ({ dataset: { a: 'medlayout' } }) }, preventDefault() {} });
@@ -910,9 +930,12 @@ server.listen(0, '127.0.0.1', async () => {
     // patient name is clickable in the list; calendar adds an appointment through the modal
     run('rt="pt"'); assert.ok(run('R.pt()').includes('data-a="open:') && run('R.pt()').includes('data-a="reg"')); ok('patient list opens patient file and registration form');
     html = run('R.pt()'); assert.ok(html.includes(`data-a="ptbed:${p.id}"`), 'patient row is missing the bed information button');
+    assert.ok(html.includes('class="card patient-table-wrap"'), 'patient list should use the responsive full-width table wrapper');
+    assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /table\.ptb\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*table-layout:\s*fixed;/s, 'patient table should fit the available width without a forced minimum width');
+    assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /\.patient-table-wrap\s*\{[^}]*overflow-x:\s*hidden;/s, 'patient list should not require horizontal scrolling');
     await run(`api('POST','ipd',{name:'Test Patient',code:'${p.id}',room:'',paid:0,out:0})`); await run('load()');
     const ipdId = run(`D.ipd.find(x=>x.code=='${p.id}').id`), ipdHtml = run(`ipdRow(D.ipd.find(x=>x.code=='${p.id}'))`);
-    assert.ok(ipdHtml.includes(`data-a="ipdbill:${p.id}"`), 'Paid status should open billing history');
+    assert.ok(ipdHtml.includes(`data-a="ipdbill:${p.id}"`), 'IPD billing status should open billing history');
     assert.ok(ipdHtml.includes(`data-a="ipdtreat:${ipdId}"`), 'IPD treatment should open treatment follow-up');
     run('openForm=__nativeOpenForm');
     await run(`ipdTreat(${ipdId})`);
@@ -920,7 +943,7 @@ server.listen(0, '127.0.0.1', async () => {
     ok('IPD treatment action opens the Treatment Follow-up interface');
     await run(`(async()=>{pAct('ipdbill','${p.id}');await new Promise(r=>setTimeout(r,100))})()`);
     const billingModal = els['#mf'].innerHTML;
-    assert.ok(billingModal.includes('Test Patient') && billingModal.includes('Billing history') && billingModal.includes('No unpaid bills found.') && billingModal.includes('Paid History') && billingModal.includes('bill-payment-table') && billingModal.includes('data-a="paidview"') && billingModal.includes('Total Paid') && billingModal.includes(`data-a="payreceipt:${paidId}"`));
+    assert.ok(billingModal.includes('Test Patient') && billingModal.includes('Billing history') && billingModal.includes('data-a="ipdinvoice:') && billingModal.includes('data-a="recpay"') && billingModal.includes('data-a="payall"') && billingModal.includes('No unpaid bills found.') && billingModal.includes('Paid History') && billingModal.includes('bill-payment-table') && billingModal.includes('data-a="paidview"') && billingModal.includes('Total Paid') && billingModal.includes(`data-a="payreceipt:${paidId}"`));
     run(`pAct('payreceipt','${paidId}')`);
     assert.equal(ctx.__pd[0], ''); assert.ok(ctx.__pd[1].includes('DETAILED INVOICE') && ctx.__pd[1].includes('KHR 80,000'));
     ok('clicking Paid in IPD opens the billing-history modal with payment receipt actions');
