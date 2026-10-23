@@ -889,7 +889,8 @@ server.listen(0, '127.0.0.1', async () => {
     for (const [act, route] of [['go:pt', 'pt'], ['go:bill', 'bill'], ['go:cur', 'cur'], ['go:ap', 'ap'], ['go:an', 'an'], ['go:da', 'da']]) { const [a, x] = act.split(':'); run(`rt="dash"; rt="${x}"`); const page = run('(R[rt]||(()=>tp(rt)))()'); assert.ok(typeof page == 'string' && page.length > 50, 'page does not render: ' + route); }
     ok('each linked page renders');
     run('rt="dash"; pAct("dashap")'); assert.equal(run('rt'), 'ap'); assert.equal(run('cal.mode'), 'day'); assert.ok(run('R.ap()').includes('Test Patient')); ok('Appointments-today card opens the calendar on today');
-    assert.ok(/Common complaints[\s\S]*cough[\s\S]*?>1</.test(run('R.dash()'))); ok('common complaints chart counts real patient complaints');
+    const dashboardChartHtml = run('R.dash()');
+    assert.ok(/Common complaints[\s\S]*cough[\s\S]*?>1</.test(dashboardChartHtml)); assert.ok(dashboardChartHtml.includes('data-tooltip="Common complaints: cough — 1 patient — 1 patient: Test Patient"') && dashboardChartHtml.includes('aria-label="Patients by address: Phnom Penh — 1 patients. 1 patient: Test Patient"'), 'dashboard chart rows should show matching report details on hover and keyboard focus'); ok('dashboard charts show matching patient details on hover and keyboard focus');
     ctx.__d = { dfrom: '2030-01-01', dto: '' }; run('rt="dash"; dFrom="2030-01-01"'); assert.ok(!/Patients by address[\s\S]*?Phnom Penh/.test(run('R.dash()'))); run('dFrom=""'); assert.ok(run('R.dash()').includes('Phnom Penh')); ok('date filter narrows the dashboard charts');
 
     // Excel export
