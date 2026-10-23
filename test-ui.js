@@ -438,8 +438,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(run('billTotals(recs).bal'), 0); assert.equal(run('jd(recs.find(r=>r.kind=="payment")).method'), 'Bank');
     html = run('billPanel()'); const paidId = run('recs.find(r=>r.kind=="payment").id');
     assert.ok(html.includes('KHR 80,000') && /data-a="payall" disabled/.test(html) && /data-a="recpay" disabled/.test(html));
-    assert.ok(html.includes(`data-a="payreceipt:${paidId}"`)); run(`pAct('payreceipt','${paidId}')`);
-    assert.equal(ctx.__pd[0], ''); assert.ok(ctx.__pd[1].includes('payment-receipt') && ctx.__pd[1].includes('DETAILED INVOICE') && ctx.__pd[1].includes('Test Patient') && ctx.__pd[1].includes('PAY-' + paidId) && ctx.__pd[1].includes('Bank') && ctx.__pd[1].includes('KHR 80,000') && ctx.__pd[1].includes('Grand Total') && ctx.__pd[1].includes('payment-receipt-signatures'));
+    assert.ok(html.includes(`data-a="payreceipt:${paidId}"`)); run(`D.clinic.banner='clinic-banner.jpg';pAct('payreceipt','${paidId}')`);
+    assert.equal(ctx.__pd[0], ''); assert.ok(ctx.__pd[1].includes('payment-receipt') && ctx.__pd[1].includes('DETAILED INVOICE') && ctx.__pd[1].includes('Test Patient') && ctx.__pd[1].includes('PAY-' + paidId) && ctx.__pd[1].includes('Bank') && ctx.__pd[1].includes('KHR 80,000') && ctx.__pd[1].includes('Grand Total') && ctx.__pd[1].includes(`${run('API_BASE')}/uploads/clinic-banner.jpg`) && ctx.__pd[1].includes('payment-receipt-signatures'));
+    run("D.clinic.banner=''");
     assert.match(fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8'), /\.payment-receipt-table th,\s*\.payment-receipt-table td\s*\{[^}]*font-size:\s*9pt;/s, 'payment receipt should use the compact invoice table styling');
     ok('paid billing history can print payment receipts; payment actions are disabled when no balance remains');
     run('openForm=function(t,b,s,o){__body=b;__save=s;__opts=o;__title=t}');
@@ -794,7 +795,10 @@ server.listen(0, '127.0.0.1', async () => {
     run('D.clinic.cnf_text=JSON.stringify({pay:"Pay at the desk",acc:"Custom English",acc_km:"ខ្លឹមសារផ្ទាល់ខ្លួន"})'); assert.equal(run('cnfTexts().pay'), 'Pay at the desk'); assert.equal(run('cnfTexts().acc'), 'Custom English'); run('lang="km"'); assert.equal(run('cnfTexts().acc'), 'ខ្លឹមសារផ្ទាល់ខ្លួន'); assert.equal(run('cnfTexts().pay'), 'Pay at the desk'); run('lang="en"; cnfForm()'); assert.ok(ctx.__body.includes('Pay at the desk')); ok('English and Khmer agreement wording is independently configurable with legacy-text fallback');
     html = run('R.set()'); assert.ok(html.includes('clinic-settings-page') && html.includes('clinic-settings-assets') && html.includes('pv_banner') && html.includes('clinic-settings-toggles') && html.includes('clinic-settings-fields') && html.includes('name="print_header"') && html.includes('name="print_footer"') && html.includes('data-a="go:dr"') && html.includes('data-a="pwd"') && html.includes('data-a="saveclinic"'), 'Clinic Settings should follow the screenshot groups and retain existing setting actions');
     assert.ok(html.includes('Consultation form agreement text') && html.includes('name="cnf_acc"') && html.includes('name="cnf_acc_km"') && html.includes('name="cnf_pay"') && html.includes('name="cnf_pay_km"')); ok('Clinic Settings has screenshot layout and editable English/Khmer agreement text');
-    run(`D.clinic.print_header='<b>Custom heading</b>';D.clinic.print_footer='Custom footer';printDoc=__nativePrintDoc;printDoc('Test print','<p>Report content</p>')`);
+    run(`D.clinic.banner='clinic-banner.jpg';printDoc=__nativePrintDoc;printDoc('Header test','body')`);
+    assert.ok(els['#pa'].innerHTML.includes(`${run('API_BASE')}/uploads/clinic-banner.jpg`), 'generic print header should load the clinic banner from the configured API host');
+    run("D.clinic.banner=''");
+    run(`D.clinic.print_header='<b>Custom heading</b>';D.clinic.print_footer='Custom footer';printDoc('Test print','<p>Report content</p>')`);
     assert.ok(els['#pa'].innerHTML.includes('class="print-config-header">&lt;b&gt;Custom heading&lt;/b&gt;') && els['#pa'].innerHTML.includes('class="print-config-footer">Custom footer</footer>') && els['#pa'].innerHTML.includes('Report content'), 'shared custom header and footer should render safely in generic print documents and reports');
     run(`D.clinic.print_header='';D.clinic.print_footer=''`);
     run('printDoc=function(t,h){}'); run('ptab="medical"');
