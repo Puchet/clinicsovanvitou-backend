@@ -257,7 +257,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 0); assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 404); ok('deleting a patient removes their records and pictures');
 
     for (const kind of ['mrd', 'schedulenote', 'cnf', 'schedule', 'treatment', 'allergy', 'vaccination', 'referral', 'diagnosis_history', 'laborder', 'imagingorder']) assert.equal((await call('POST', '/api/records', { patient_id: (await call('POST', '/api/patients', { name: 'K' + kind })).body.id, kind, title: 'Standard', data: { x: 1 } })).status, 201); ok('MRD, follow-up, clinical orders, and six new patient modules are accepted');
-    const ct = (await call('PUT', '/api/clinic', { cnf_text: { acc: 'Custom wording' } })).body; assert.equal(JSON.parse(ct.cnf_text).acc, 'Custom wording'); assert.equal(JSON.parse((await call('GET', '/api/clinic')).body.cnf_text).acc, 'Custom wording'); ok('consultation-form agreement text saved in clinic settings');
+    const printSettings = (await call('PUT', '/api/clinic', { print_header: 'Clinic print heading', print_footer: 'Clinic contact footer' })).body;
+    assert.equal(printSettings.print_header, 'Clinic print heading'); assert.equal(printSettings.print_footer, 'Clinic contact footer');
+    const ct = (await call('PUT', '/api/clinic', { cnf_text: { acc: 'Custom wording' } })).body; assert.equal(JSON.parse(ct.cnf_text).acc, 'Custom wording'); assert.equal(JSON.parse((await call('GET', '/api/clinic')).body.cnf_text).acc, 'Custom wording'); ok('custom shared print header/footer and consultation wording save in clinic settings');
     const idx = await fetch(base + '/'); assert.equal(idx.status, 200); assert.ok((await idx.text()).includes('SOVANVITOU')); ok('frontend served');
     assert.equal((await fetch(base + '/app.js')).status, 200); assert.equal((await fetch(base + '/styles.css')).status, 200); ok('frontend script and styles served');
     assert.equal((await fetch(base + '/..%2fserver.js')).status, 403); ok('path traversal blocked');

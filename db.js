@@ -29,7 +29,7 @@ const RES = {
   chat:          { cols: { msg: 's!', user_id: 'i' }, search: ['msg'], order: 'id' },
 };
 
-const CLINIC = { cols: { name: 's', specialty: 's', address: 's', phone: 's', currency: 's', rate: 'i', logo: 's', qr: 's', banner: 's', show_name: 'b', show_address: 'b', show_phone: 'b', cnf_text: 'j' } };
+const CLINIC = { cols: { name: 's', specialty: 's', address: 's', phone: 's', currency: 's', rate: 'i', logo: 's', qr: 's', banner: 's', show_name: 'b', show_address: 'b', show_phone: 'b', print_header: 'x', print_footer: 'x', cnf_text: 'j' } };
 
 const SQLT = { s: 'TEXT', x: 'TEXT', j: 'TEXT', i: 'INTEGER', b: 'INTEGER' };
 const dflt = (k) => (k === 'i' || k === 'b' ? '0' : k === 'j' ? "'{}'" : "''");
@@ -152,9 +152,13 @@ async function initDb() {
       show_name INTEGER NOT NULL DEFAULT 1,
       show_address INTEGER NOT NULL DEFAULT 1,
       show_phone INTEGER NOT NULL DEFAULT 1,
+      print_header TEXT NOT NULL DEFAULT '',
+      print_footer TEXT NOT NULL DEFAULT '',
       cnf_text TEXT NOT NULL DEFAULT '{}',
       updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     )`);
+    await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS print_header TEXT NOT NULL DEFAULT ''`);
+    await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS print_footer TEXT NOT NULL DEFAULT ''`);
     await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS cnf_text TEXT NOT NULL DEFAULT '{}'`);
     await p.query(`INSERT INTO clinic(id) VALUES(1) ON CONFLICT (id) DO NOTHING`);
 
