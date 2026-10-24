@@ -25,7 +25,14 @@ server.listen(0, '127.0.0.1', async () => {
   });
   ctx.URL = Object.assign(function () {}, { createObjectURL: (b) => { downloads.blob = b; return 'blob:x'; }, revokeObjectURL() {} });
   const frontendDir = fs.existsSync(path.resolve(__dirname, '../frontend')) ? path.resolve(__dirname, '../frontend') : path.join(__dirname, 'public');
-  vm.runInContext(fs.readFileSync(path.join(frontendDir, 'app.js'), 'utf8'), ctx);
+  const appSource = fs.readFileSync(path.join(frontendDir, 'app.js'), 'utf8');
+  const indexSource = fs.readFileSync(path.join(frontendDir, 'index.html'), 'utf8');
+  const styleSource = fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8');
+  assert.match(indexSource, /<div id="lg" hidden>/, 'Login UI should start hidden during session restoration');
+  assert.match(indexSource, /id="startup-loading" class="login-loading"/, 'Refresh should show the startup logo while restoring a session');
+  assert.match(styleSource, /#lg\[hidden\]\s*\{\s*display:\s*none;/, 'The hidden login attribute should be respected by CSS');
+  assert.match(appSource, /if\(tok&&!needSetup\)\s*\{[\s\S]*?\$\('#lg'\)\.style\.display='none'/, 'A saved session should be restored before login can be shown');
+  vm.runInContext(appSource, ctx);
   vm.runInContext(fs.readFileSync(path.join(frontendDir, 'patient.js'), 'utf8'), ctx);
   const run = (code) => vm.runInContext(code, ctx);
   ctx.__nativeOpenForm = run('openForm');
