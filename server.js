@@ -26,6 +26,11 @@ let ocrWorkerPromise = null;
 
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const bad = (m) => new HttpError(400, m);
+const isISODate = (value) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(value + 'T00:00:00Z');
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+};
 
 // ---------- helpers ----------
 async function readJson(req, max = 1e6) {
@@ -124,6 +129,12 @@ function clean(name, body, partial, spec = RES[name]) {
       });
       out.units = JSON.stringify(units);
     }
+  }
+  if (name === 'appointments') {
+    if ('type' in out && !['', 'Follow Up'].includes(out.type)) throw bad('type is not valid');
+    if ('reminder_status' in out && !['', 'Pending', 'Sent'].includes(out.reminder_status)) throw bad('reminder_status is not valid');
+    if ('reminder_date' in out && out.reminder_date && !isISODate(out.reminder_date)) throw bad('reminder_date must be a valid date');
+    if (out.type === 'Follow Up' && out.date && !isISODate(out.date)) throw bad('date must be a valid date');
   }
   if (name === 'records') {
     if ('kind' in out && !KINDS.includes(out.kind)) throw bad('kind is not valid');
@@ -307,7 +318,19 @@ async function importLabs(rows) {
       }
     } else fields = [];
     if (!Array.isArray(fields) || fields.length > 50) throw bad(`Row ${row.rowNumber || '?'}: fields must contain up to 50 entries`);
-    const normalizedFields = fields.map((field) => String(field ?? '').trim()).filter(Boolean);
+    const normalizedFields = fields.map((field) => {
+      if (typeof field === 'string') {
+        const name = field.trim();
+        return name ? { name, normal_range: '', unit: '' } : null;
+      }
+      if (!field || typeof field !== 'object' || Array.isArray(field)) return null;
+      const name = String(field.name ?? '').trim();
+      return name ? {
+        name,
+        normal_range: String(field.normal_range ?? field.normalRange ?? '').trim(),
+        unit: String(field.unit ?? '').trim(),
+      } : null;
+    }).filter(Boolean);
     const template = clean('labs', {
       name: row.name,
       price: amount,
@@ -873,9 +896,21 @@ async function api(req, res, url) {
       }
     };
     const needPatient = async (d, must) => {
-      if (a !== 'records') return;
-      if (must && !d.patient_id) throw bad('patient_id is required');
-      if ('patient_id' in d && !(await queryOne('SELECT 1 FROM patients WHERE id=$1', [d.patient_id]))) throw bad('Patient not found');
+      if (a === 'records') {
+        if (must && !d.patient_id) throw bad('patient_id is required');
+        if ('patient_id' in d && !(await queryOne('SELECT 1 FROM patients WHERE id=$1', [d.patient_id]))) throw bad('Patient not found');
+        return;
+      }
+      if (a !== 'appointments') return;
+      const existing = !must && id ? await queryOne('SELECT patient_id,type,date,reminder_date FROM appointments WHERE id=$1', [id]) : null;
+      const patientId = Object.hasOwn(d, 'patient_id') ? d.patient_id : existing?.patient_id;
+      const type = Object.hasOwn(d, 'type') ? d.type : existing?.type;
+      const date = Object.hasOwn(d, 'date') ? d.date : existing?.date;
+      const reminderDate = Object.hasOwn(d, 'reminder_date') ? d.reminder_date : existing?.reminder_date;
+      if (type === 'Follow Up' && !patientId) throw bad('patient_id is required for follow-up appointments');
+      if (type === 'Follow Up' && (!date || !isISODate(date))) throw bad('date must be a valid date for follow-up appointments');
+      if (type === 'Follow Up' && reminderDate && (!isISODate(reminderDate) || reminderDate > date)) throw bad('reminder_date must be on or before the appointment date');
+      if (patientId && !(await queryOne('SELECT 1 FROM patients WHERE id=$1', [patientId]))) throw bad('Patient not found');
     };
 
     if (id === null && m === 'GET') {
@@ -940,7 +975,10 @@ async function api(req, res, url) {
       const imgs = names.filter((n) => IMG.includes(n));
       const old = imgs.length ? await queryOne(`SELECT ${imgs.map((q) => `"${q}"`).join(',')} FROM "${a}" WHERE id=$1`, [id]) : null;
       const recImgs = a === 'patients' ? (await queryAll("SELECT image FROM records WHERE patient_id=$1 AND image<>''", [id])).map((x) => x.image) : [];
-      if (a === 'patients') await query('DELETE FROM records WHERE patient_id=$1', [id]);
+      if (a === 'patients') {
+        await query('DELETE FROM records WHERE patient_id=$1', [id]);
+        await query('DELETE FROM appointments WHERE patient_id=$1', [id]);
+      }
       const r = await query(`DELETE FROM "${a}" WHERE id=$1`, [id]);
       if (!r.rowCount) throw new HttpError(404, 'Not found');
       if (old) for (const k of imgs) await dropFile(old[k]);

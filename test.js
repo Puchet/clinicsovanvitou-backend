@@ -34,6 +34,9 @@ server.listen(0, '127.0.0.1', async () => {
     const list = await call('GET', '/api/patients?q=' + encodeURIComponent('%')); assert.equal(list.body.length, 0); ok('LIKE wildcards are escaped');
     assert.equal((await call('GET', '/api/patients?q=sok')).body.length, 1); ok('search works');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { phone: '012 345 678' })).body.phone, '012 345 678'); ok('update patient');
+    assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { diagnosis: 'New API Diagnosis' })).body.diagnosis, 'New API Diagnosis');
+    assert.equal((await call('GET', `/api/patients/${p.body.id}`)).body.diagnosis, 'New API Diagnosis');
+    assert.equal((await call('GET', '/api/patients?q=' + encodeURIComponent('New API Diagnosis'))).body[0].id, p.body.id); ok('patient diagnosis is saved and searchable');
     assert.equal((await call('GET', '/api/patients/99999')).status, 404); ok('404 for missing record');
     const sampleFile = await call('POST', '/api/files', { name: 'Clinic letter', content: '<p onclick="x()">Clinic <strong>hours</strong></p><script>alert(1)</script><img src="javascript:alert(1)">' });
     assert.equal(sampleFile.status, 201);
@@ -239,6 +242,13 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(pt.latin_name, 'Sok Dara'); assert.equal(pt.nssf, 1); assert.equal(pt.khmer, 1); assert.equal(pt.pet, 0); assert.equal(pt.complaints.length, 1200); assert.equal(pt.age_unit, 'M'); ok('full patient registration saved (long text, flags, age unit)');
     assert.equal((await call('POST', '/api/patients', { name: 'Bad', age_unit: 'Z' })).status, 400); ok('age unit validated');
     assert.equal((await call('POST', '/api/appointments', { name: 'Sok Dara', date: '2026-10-20', time: '09:30', st: 'Waiting' })).body.time, '09:30'); ok('appointment time saved');
+    const followUp = await call('POST', '/api/appointments', { name: pt.name, patient_id: pt.id, type: 'Follow Up', svc: 'Review', date: '2026-10-25', time: '09:30', st: 'Waiting', reminder_date: '2026-10-24', reminder_status: 'Pending', notes: 'Bring test results' });
+    assert.equal(followUp.status, 201); assert.equal(followUp.body.type, 'Follow Up'); assert.equal(followUp.body.patient_id, pt.id); assert.equal(followUp.body.reminder_status, 'Pending');
+    assert.equal((await call('PUT', `/api/appointments/${followUp.body.id}`, { reminder_status: 'Sent' })).body.reminder_status, 'Sent');
+    assert.equal((await call('POST', '/api/appointments', { name: pt.name, type: 'Follow Up', date: '2026-10-25' })).status, 400);
+    assert.equal((await call('POST', '/api/appointments', { name: pt.name, patient_id: 99999, type: 'Follow Up', date: '2026-10-25' })).status, 400);
+    assert.equal((await call('POST', '/api/appointments', { name: pt.name, patient_id: pt.id, type: 'Follow Up', date: '2026-10-25', reminder_date: '2026-10-26' })).status, 400);
+    ok('follow-up appointments link to patients and track reminder status');
     const vit = await call('POST', '/api/records', { patient_id: pt.id, kind: 'vitals', date: '2026-10-14', data: { t: '36.8', hr: '80', bp: '120/80' } });
     assert.equal(vit.status, 201); assert.equal(JSON.parse(vit.body.data).bp, '120/80'); ok('vital signs record saved with JSON data');
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'medical', data: { cc: 'Cough', vacc: ['BCG/HepB'], mt: [['d', 'e', 't']] } })).status, 201); ok('medical record saved');
@@ -254,7 +264,7 @@ server.listen(0, '127.0.0.1', async () => {
     const withImg = (await call('POST', '/api/records', { patient_id: pt.id, kind: 'beu', title: 'Photo', image: rp.photo })).body;
     assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 200);
     assert.equal((await call('DELETE', `/api/patients/${pt.id}`)).status, 200); await new Promise((r) => setTimeout(r, 100));
-    assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 0); assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 404); ok('deleting a patient removes their records and pictures');
+    assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 0); assert.equal((await call('GET', `/api/appointments?patient_id=${pt.id}`)).body.length, 0); assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 404); ok('deleting a patient removes their records, follow-ups and pictures');
 
     for (const kind of ['mrd', 'schedulenote', 'cnf', 'schedule', 'treatment', 'allergy', 'vaccination', 'referral', 'diagnosis_history', 'laborder', 'imagingorder']) assert.equal((await call('POST', '/api/records', { patient_id: (await call('POST', '/api/patients', { name: 'K' + kind })).body.id, kind, title: 'Standard', data: { x: 1 } })).status, 201); ok('MRD, follow-up, clinical orders, and six new patient modules are accepted');
     const printSettings = (await call('PUT', '/api/clinic', { print_header: 'Clinic print heading', print_footer: 'Clinic contact footer' })).body;
