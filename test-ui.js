@@ -458,6 +458,13 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(labResult, ctx.__toast || 'Lab result should be saved');
     assert.deepEqual(JSON.parse(labResult.data).fields.map(field => [field.name, field.result]), [['Sodium', '140'], ['Potassium', '4.2'], ['Albumin', '4.5']]);
     assert.equal(JSON.parse(labResult.data).requested_by, 'Dr Dara'); assert.equal(JSON.parse(labResult.data).lab_technician, 'Nurse Srey');
+    assert.equal(run('billTotals(recs).ch'), 20000, 'saved lab test prices should be included in patient billing');
+    assert.ok(run('billingLineItems(recs)').filter(item => item.category == 'Lab Charges').some(item => item.name == 'Sodium,Potassium,Clorine' && item.price == 10000), 'lab billing should itemize the selected tests at their saved prices');
+    await run('payForm(pdId)');
+    assert.ok(els['#mf'].innerHTML.includes('Record payment') && els['#mf'].innerHTML.includes('KHR 20,000'), 'lab charges should be payable through the patient payment form');
+    await run('__save({__m:{amount:"20000",method:"Cash"}})');
+    assert.equal(run(`patientDue(${p.id})`), 0, 'recording payment for lab results should clear the lab balance');
+    assert.equal(run(`recs.filter(r=>r.kind=='payment').reduce((sum,r)=>sum+(Number(JSON.parse(r.data).applied_amount)||0),0)`), 20000, 'lab payment should be saved as a patient payment record');
     let labResultCard = run('recPanel()');
     for (const action of [`data-a="redit:${labResult.id}"`, `data-a="labrecordprint:${labResult.id}"`, `data-a="labrecordprint:${labResult.id}:sl"`, `data-a="labrecordprint:${labResult.id}:cl"`, `data-a="rdel:${labResult.id}"`]) assert.ok(labResultCard.includes(action), `Results row should include ${action}`);
     assert.ok(labResultCard.includes('lab-result-summary') && labResultCard.includes('S+L') && labResultCard.includes('CL') && labResultCard.includes('Completed'), 'Results row should follow the screenshot with status and additional print actions');
