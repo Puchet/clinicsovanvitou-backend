@@ -10,12 +10,13 @@ pg.types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
 
 const RES = {
   patients:      { cols: { name: 's!', latin_name: 's', age: 'i', age_unit: 's', dob: 's', sex: 's', phone: 's', addr: 's', type: 's', room: 's', bed: 's', unpaid: 'b', khmer: 'b', nssf: 'b', pet: 'b', follow_up: 'b', diagnosis: 's', nssf_id: 's', national_id: 's', complaints: 'x', history: 'x', reg_date: 's', photo: 's' }, search: ['name', 'latin_name', 'phone', 'addr', 'nssf_id', 'national_id', 'diagnosis'], order: 'id DESC' },
-  appointments:  { cols: { name: 's!', svc: 's', date: 's', time: 's', doc: 's', phone: 's', st: 's', patient_id: 'i', type: 's', reminder_date: 's', reminder_status: 's', notes: 'x' }, search: ['name', 'svc', 'doc', 'phone', 'notes'], order: 'date DESC, id DESC' },
+  appointments:  { cols: { name: 's!', svc: 's', date: 's', time: 's', doc: 's', phone: 's', st: 's', patient_id: 'i', type: 's', reminder_date: 's', reminder_status: 's', telesales: 's', pancake: 's', description: 'x', notes: 'x' }, search: ['name', 'svc', 'doc', 'phone', 'description', 'notes'], order: 'date DESC, id DESC' },
   ipd:           { cols: { name: 's!', code: 's', room: 's', bed: 's', paid: 'b', out: 'b' }, search: ['name', 'code', 'room', 'bed'], order: 'id DESC' },
   doctors:       { cols: { name: 's!', role: 's', code: 's!', phone: 's', av: 's', workdays: 's', photo: 's', signature: 'j', department: 's', specialist: 's', epf_no: 's', basic_salary_cents: 'i', contract_type: 's', work_location: 's', date_joined: 's' }, search: ['name', 'code', 'role'], order: 'id' },
   payslips:      { cols: { doctor_id: 'i!', period_month: 'i!', period_year: 'i!', date_start: 's!', date_end: 's!', basic_cents: 'i!', position_allowance_cents: 'i!', overtime_cents: 'i!', benefits_cents: 'i!', deduction_cents: 'i!', note: 'x' }, search: ['note'], order: 'period_year DESC, period_month DESC, id DESC' },
+  leaves:        { cols: { employee_name: 's!', leave_type: 's!', start_date: 's!', end_date: 's!', reason: 'x', status: 's!' }, search: ['employee_name', 'leave_type', 'reason', 'status'], order: 'start_date DESC, id DESC' },
   expenses:      { cols: { name: 's!', category: 's', payee: 's', date: 's!', unit_price: 'i', quantity: 'i', amount: 'i!', notes: 'x' }, search: ['name', 'category', 'payee', 'notes'], order: 'date DESC, id DESC' },
-  medicines:     { cols: { name: 's!', composition: 's', price: 'i', stock: 'i', photo: 's', units: 'x', expiration_date: 's', notification_date: 's' }, search: ['name', 'composition'], order: 'LOWER(name)' },
+  medicines:     { cols: { name: 's!', composition: 's', price: 'i', stock: 'i', photo: 's', units: 'x', default_morning: 's', default_noon: 's', default_evening: 's', default_night: 's', default_duration: 'i', default_quantity: 'i', expiration_date: 's', notification_date: 's' }, search: ['name', 'composition'], order: 'LOWER(name)' },
   services:      { cols: { name: 's!', price: 'i', description: 'x' }, search: ['name', 'description'], order: 'LOWER(name)' },
   labs:          { cols: { name: 's!', price: 'i', cat: 's', fields: 'x' }, search: ['name', 'cat'], order: 'LOWER(name)' },
   labcategories: { cols: { name: 's!' }, search: ['name'], order: 'LOWER(name)' },
@@ -29,7 +30,7 @@ const RES = {
   chat:          { cols: { msg: 's!', user_id: 'i' }, search: ['msg'], order: 'id' },
 };
 
-const CLINIC = { cols: { name: 's', specialty: 's', address: 's', phone: 's', currency: 's', rate: 'i', logo: 's', qr: 's', banner: 's', show_name: 'b', show_address: 'b', show_phone: 'b', print_header: 'x', print_footer: 'x', cnf_text: 'j' } };
+const CLINIC = { cols: { name: 's', specialty: 's', address: 's', phone: 's', currency: 's', rate: 'i', logo: 's', qr: 's', banner: 's', footer_banner: 's', footer_banner_text: 'x', footer_banner_mode: 's', show_name: 'b', show_address: 'b', show_phone: 'b', print_header: 'x', print_footer: 'x', print_template: 'j', cnf_text: 'j' } };
 
 const SQLT = { s: 'TEXT', x: 'TEXT', j: 'TEXT', i: 'INTEGER', b: 'INTEGER' };
 const dflt = (k) => (k === 'i' || k === 'b' ? '0' : k === 'j' ? "'{}'" : "''");
@@ -135,6 +136,14 @@ async function initDb() {
         await p.query(`ALTER TABLE "${t}" ADD COLUMN IF NOT EXISTS "${c}" ${SQLT[ty[0]]} NOT NULL DEFAULT ${dflt(ty[0])}`);
       }
     }
+    await p.query(`CREATE TABLE IF NOT EXISTS patient_portal_tokens (
+      id SERIAL PRIMARY KEY,
+      patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      revoked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await p.query('CREATE INDEX IF NOT EXISTS patient_portal_tokens_patient_idx ON patient_portal_tokens(patient_id)');
     await p.query('CREATE UNIQUE INDEX IF NOT EXISTS payslips_doctor_period_unique ON payslips(doctor_id, period_year, period_month)');
 
     // 2. Create clinic table
@@ -149,16 +158,24 @@ async function initDb() {
       logo TEXT NOT NULL DEFAULT '',
       qr TEXT NOT NULL DEFAULT '',
       banner TEXT NOT NULL DEFAULT '',
+      footer_banner TEXT NOT NULL DEFAULT '',
+      footer_banner_text TEXT NOT NULL DEFAULT '',
+      footer_banner_mode TEXT NOT NULL DEFAULT 'image',
       show_name INTEGER NOT NULL DEFAULT 1,
       show_address INTEGER NOT NULL DEFAULT 1,
       show_phone INTEGER NOT NULL DEFAULT 1,
       print_header TEXT NOT NULL DEFAULT '',
       print_footer TEXT NOT NULL DEFAULT '',
+      print_template TEXT NOT NULL DEFAULT '{}',
       cnf_text TEXT NOT NULL DEFAULT '{}',
       updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     )`);
     await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS print_header TEXT NOT NULL DEFAULT ''`);
     await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS print_footer TEXT NOT NULL DEFAULT ''`);
+    await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS footer_banner TEXT NOT NULL DEFAULT ''`);
+    await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS footer_banner_text TEXT NOT NULL DEFAULT ''`);
+    await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS footer_banner_mode TEXT NOT NULL DEFAULT 'image'`);
+    await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS print_template TEXT NOT NULL DEFAULT '{}'`);
     await p.query(`ALTER TABLE clinic ADD COLUMN IF NOT EXISTS cnf_text TEXT NOT NULL DEFAULT '{}'`);
     await p.query(`INSERT INTO clinic(id) VALUES(1) ON CONFLICT (id) DO NOTHING`);
 
@@ -169,9 +186,11 @@ async function initDb() {
         email TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL DEFAULT '',
         role TEXT NOT NULL DEFAULT 'staff',
+        permissions TEXT NOT NULL DEFAULT '{}',
         pass TEXT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT NOT NULL DEFAULT '{}';
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL

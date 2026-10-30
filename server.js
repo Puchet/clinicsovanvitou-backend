@@ -15,9 +15,9 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC = process.env.PUBLIC_DIR || (fs.existsSync(path.resolve(__dirname, '../frontend')) ? path.resolve(__dirname, '../frontend') : path.join(__dirname, 'public'));
 const UPLOADS = path.join(dataDir, 'uploads');
-const IMG = ['photo', 'logo', 'qr', 'banner', 'image'];
+const IMG = ['photo', 'logo', 'qr', 'banner', 'footer_banner', 'image'];
 const KINDS = ['vitals', 'medical', 'mdhistory', 'beu', 'schedule', 'payment', 'treatment', 'consultation', 'operation', 'investigation', 'lab', 'echo', 'xray', 'homecare', 'prescription', 'medlist', 'documents', 'mrd', 'schedulenote', 'cnf', 'allergy', 'vaccination', 'referral', 'diagnosis_history', 'laborder', 'imagingorder'];
-const USES = [['medicines', 'photo'], ['doctors', 'photo'], ['patients', 'photo'], ['clinic', 'logo'], ['clinic', 'qr'], ['clinic', 'banner'], ['records', 'image']];
+const USES = [['medicines', 'photo'], ['doctors', 'photo'], ['patients', 'photo'], ['clinic', 'logo'], ['clinic', 'qr'], ['clinic', 'banner'], ['clinic', 'footer_banner'], ['records', 'image']];
 const PHOTO_RE = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
 const CORS = process.env.CORS_ORIGIN || '';
 const tzh = Number.isFinite(Number(process.env.TZ_OFFSET_HOURS)) ? Number(process.env.TZ_OFFSET_HOURS) : 7;
@@ -69,6 +69,7 @@ function send(res, status, body, extra = {}) {
 const medicineCodeSvg = (medicine, kind) => kind === 'qr'
   ? QRCode.toString(JSON.stringify({ id: medicine.id, name: medicine.name, composition: medicine.composition }), { type: 'svg', errorCorrectionLevel: 'M', margin: 2, width: 256 })
   : bwipjs.toSVG({ bcid: 'code128', text: String(medicine.id), scale: 3, height: 15, includetext: true, textxalign: 'center' });
+const patientPortalTokenHash = (token) => crypto.createHash('sha256').update(token).digest('hex');
 const escapeXml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[char]);
 function clean(name, body, partial, spec = RES[name]) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('Body must be a JSON object');
@@ -102,6 +103,62 @@ function clean(name, body, partial, spec = RES[name]) {
   if (!name) {
     if ('currency' in out && !['KHR', 'USD'].includes(out.currency)) throw bad('currency must be KHR or USD');
     if ('rate' in out && (out.rate < 100 || out.rate > 100000)) throw bad('rate is not valid');
+    if ('print_template' in out) {
+      let template;
+      try { template = JSON.parse(out.print_template); } catch { throw bad('print_template must be a valid template object'); }
+      if (!template || typeof template !== 'object' || Array.isArray(template)) throw bad('print_template must be a valid template object');
+      const allowed = ['paperSize', 'orientation', 'marginMm', 'fontFamily', 'fontSizePt', 'elements'];
+      if (Object.keys(template).some((key) => !allowed.includes(key))) throw bad('print_template contains an unsupported setting');
+      const paperSize = template.paperSize ?? 'form', orientation = template.orientation ?? 'auto';
+      const marginMm = template.marginMm == null || template.marginMm === '' ? null : Number(template.marginMm);
+      const fontFamily = template.fontFamily ?? 'system', fontSizePt = template.fontSizePt == null || template.fontSizePt === '' ? null : Number(template.fontSizePt);
+      if (!['form', 'A4', 'A5', 'Letter'].includes(paperSize)) throw bad('print_template paper size is not valid');
+      if (!['auto', 'portrait', 'landscape'].includes(orientation)) throw bad('print_template orientation is not valid');
+      if (marginMm !== null && ![5, 8, 10, 12, 15, 20].includes(marginMm)) throw bad('print_template margin is not valid');
+      if (!['system', 'inter', 'arial', 'khmer'].includes(fontFamily)) throw bad('print_template font is not valid');
+      if (fontSizePt !== null && ![8, 9, 10, 11, 12, 14, 16, 18].includes(fontSizePt)) throw bad('print_template font size is not valid');
+      const validColumns = ['item', 'description', 'qty', 'each', 'vat', 'total'];
+      const elements = template.elements ?? [];
+      if (!Array.isArray(elements) || elements.length > 40) throw bad('print_template must contain up to 40 items');
+      const ids = new Set();
+      const safeElements = elements.map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) throw bad('Each print template item must be an object');
+        const itemKeys = ['id', 'type', 'zone', 'field', 'text', 'x', 'y', 'width', 'height', 'fontSize', 'bold', 'align', 'color', 'background', 'border', 'columns', 'condition'];
+        if (Object.keys(item).some((key) => !itemKeys.includes(key))) throw bad('Print template item contains an unsupported setting');
+        const { id, type, zone = 'header' } = item;
+        if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id) || ids.has(id)) throw bad('Print template item ID is not valid');
+        ids.add(id);
+        if (!['label', 'field', 'line', 'vline', 'image', 'table', 'summary', 'tax'].includes(type)) throw bad('Print template item type is not valid');
+        if (!['header', 'footer'].includes(zone)) throw bad('Print template item section is not valid');
+        const field = item.field ?? (type === 'image' ? 'clinicLogo' : 'customText');
+        if (!['customText', 'clinicName', 'documentTitle', 'currentDate', 'clinicAddress', 'clinicPhone', 'clinicLogo'].includes(field)) throw bad('Print template item field is not valid');
+        const text = String(item.text ?? '');
+        if (text.length > 255) throw bad('Print template item text is too long');
+        const position = (key, minimum, fallback) => {
+          const value = Number(item[key] ?? fallback);
+          if (!Number.isInteger(value) || value < minimum || value > 100) throw bad(`Print template item ${key} is not valid`);
+          return value;
+        };
+        const x = position('x', 0, 0), y = position('y', 0, 0);
+        const width = position('width', 5, 30), height = position('height', 5, 20);
+        if (x + width > 100 || y + height > 100) throw bad('Print template item must fit inside its section');
+        const fontSize = Number(item.fontSize ?? 10);
+        if (![8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48].includes(fontSize)) throw bad('Print template item font size is not valid');
+        const color = item.color ?? '#111827', background = item.background ?? 'transparent';
+        if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) throw bad('Print template item color is not valid');
+        if (typeof background !== 'string' || (background !== 'transparent' && !/^#[0-9a-f]{6}$/i.test(background))) throw bad('Print template item fill is not valid');
+        const align = item.align ?? 'left';
+        if (!['left', 'center', 'right'].includes(align)) throw bad('Print template item alignment is not valid');
+        const condition = item.condition ?? 'always';
+        if (!['always', 'hasLogo', 'hasClinicAddress'].includes(condition)) throw bad('Print template item condition is not valid');
+        if (item.bold != null && typeof item.bold !== 'boolean') throw bad('Print template item bold setting is not valid');
+        if (item.border != null && typeof item.border !== 'boolean') throw bad('Print template item border setting is not valid');
+        const columns = item.columns ?? [];
+        if (!Array.isArray(columns) || columns.length > validColumns.length || columns.some((column) => !validColumns.includes(column)) || new Set(columns).size !== columns.length) throw bad('Print template item columns are not valid');
+        return { id, type, zone, field, text, x, y, width, height, fontSize, bold: item.bold === true, align, color, background, border: item.border !== false, columns, condition };
+      });
+      out.print_template = JSON.stringify({ paperSize, orientation, marginMm, fontFamily, fontSizePt, elements: safeElements });
+    }
   }
   if (name === 'patients') {
     if ('type' in out && !['OPD', 'IPD'].includes(out.type)) throw bad('type must be OPD or IPD');
@@ -253,6 +310,27 @@ async function importServices(rows) {
     }
   });
   return services.length;
+}
+async function importPatients(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('Excel workbook must contain 1–1,000 patients');
+  const patients = rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw bad('Each patient must be an object');
+    try { return clean('patients', row, false); }
+    catch (error) {
+      if (error instanceof HttpError) throw bad(`Row ${row.rowNumber || '?'}: ${error.message}`);
+      throw error;
+    }
+  });
+  await tx(async (client) => {
+    for (const patient of patients) {
+      const columns = Object.keys(patient);
+      await client.query(
+        `INSERT INTO patients(${columns.map((column) => `"${column}"`).join(',')}) VALUES(${columns.map((_, index) => `$${index + 1}`).join(',')})`,
+        columns.map((column) => patient[column]),
+      );
+    }
+  });
+  return patients.length;
 }
 async function importMedicines(rows) {
   if (!Array.isArray(rows) || !rows.length || rows.length > 1000) throw bad('rows must contain 1–1,000 medicines');
@@ -411,6 +489,47 @@ function fail(key) {
 }
 const DUMMY = '00000000000000000000000000000000:' + '00'.repeat(64);
 
+const PERMISSION_AREAS = {
+  patients: ['patients'],
+  appointments_ipd: ['appointments', 'ipd', 'chat'],
+  clinical: ['records'],
+  pharmacy_services: ['medicines', 'services', 'sales'],
+  finance_reports: ['expenses'],
+  staff_payroll: ['doctors', 'payslips', 'leaves'],
+  templates_reference: ['labs', 'labcategories', 'echo', 'diagnoses', 'prescriptions', 'symptoms', 'addresses', 'files'],
+  clinic_settings: ['clinic'],
+  user_management: ['users'],
+};
+const PERMISSION_ACTIONS = ['view', 'create', 'edit', 'delete', 'print'];
+function defaultStaffPermissions() {
+  return Object.fromEntries(Object.keys(PERMISSION_AREAS).map((area) => [area,
+    ['clinic_settings', 'user_management'].includes(area)
+      ? Object.fromEntries(PERMISSION_ACTIONS.map((action) => [action, false]))
+      : { view: true, create: true, edit: true, delete: false, print: true },
+  ]));
+}
+function parsePermissions(value) {
+  let source = value;
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source); } catch { source = null; }
+  }
+  if (!source || typeof source !== 'object' || Array.isArray(source) || !Object.keys(source).length) return defaultStaffPermissions();
+  return Object.fromEntries(Object.keys(PERMISSION_AREAS).map((area) => [
+    area, Object.fromEntries(PERMISSION_ACTIONS.map((action) => [action, source[area]?.[action] === true])),
+  ]));
+}
+function validatePermissions(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw bad('permissions must be an object');
+  for (const area of Object.keys(value)) if (!Object.hasOwn(PERMISSION_AREAS, area)) throw bad(`Unknown permission area: ${area}`);
+  return Object.fromEntries(Object.keys(PERMISSION_AREAS).map((area) => {
+    const source = value[area] || {};
+    if (typeof source !== 'object' || Array.isArray(source)) throw bad(`permissions.${area} must be an object`);
+    for (const action of Object.keys(source)) if (!PERMISSION_ACTIONS.includes(action)) throw bad(`Unknown permission action: ${action}`);
+    for (const action of PERMISSION_ACTIONS) if (action in source && typeof source[action] !== 'boolean') throw bad(`permissions.${area}.${action} must be true or false`);
+    return [area, Object.fromEntries(PERMISSION_ACTIONS.map((action) => [action, source[action] === true]))];
+  }));
+}
+
 // ---------- API ----------
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // after "api"
@@ -419,6 +538,22 @@ async function api(req, res, url) {
 
   if (a === 'health') return send(res, 200, { ok: true });
   if (a === 'auth' && b === 'status' && m === 'GET') return send(res, 200, { needsSetup: (await userCount()) === 0 });
+  if (a === 'portal' && b && m === 'GET') {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(b)) throw new HttpError(404, 'Patient portal link not found');
+    const access = await queryOne('SELECT patient_id FROM patient_portal_tokens WHERE token_hash=$1 AND revoked_at IS NULL', [patientPortalTokenHash(b)]);
+    if (!access) throw new HttpError(404, 'Patient portal link not found');
+    const patient = await queryOne('SELECT id,name,latin_name,age,age_unit,sex,phone,addr,khmer,nssf_id,national_id,diagnosis,complaints,history FROM patients WHERE id=$1', [access.patient_id]);
+    if (!patient) throw new HttpError(404, 'Patient portal link not found');
+    const [appointments, records] = await Promise.all([
+      queryAll('SELECT date,time,svc,doc,st,type,notes FROM appointments WHERE patient_id=$1 ORDER BY date DESC,id DESC LIMIT 500', [patient.id]),
+      queryAll("SELECT kind,title,date,notes,data FROM records WHERE patient_id=$1 AND kind<>'payment' ORDER BY date DESC,id DESC LIMIT 500", [patient.id]),
+    ]);
+    return send(res, 200, {
+      patient,
+      appointments,
+      records: records.map((record) => ({ ...record, data: typeof record.data === 'string' ? JSON.parse(record.data || '{}') : record.data || {} })),
+    });
+  }
 
   if (a === 'auth' && (b === 'setup' || b === 'login') && m === 'POST') {
     const body = await readJson(req);
@@ -437,16 +572,106 @@ async function api(req, res, url) {
     const ok = await checkPw(password, u ? u.pass : DUMMY);
     if (!u || !ok) { fail(key); throw new HttpError(401, 'Wrong email or password'); }
     fails.delete(key);
-    return send(res, 200, { token: sign({ uid: u.id }), user: { id: u.id, email: u.email, name: u.name, role: u.role } });
+    return send(res, 200, { token: sign({ uid: u.id }), user: { id: u.id, email: u.email, name: u.name, role: u.role, permissions: u.role === 'admin' ? null : parsePermissions(u.permissions), permissions_custom: Boolean(u.permissions && u.permissions !== '{}') } });
   }
 
   // everything below needs a valid token
   const tok = verify((req.headers.authorization || '').replace(/^Bearer /, ''));
-  const user = tok && (await queryOne('SELECT id,email,name,role FROM users WHERE id=$1', [tok.uid]));
+  const user = tok && (await queryOne('SELECT id,email,name,role,permissions FROM users WHERE id=$1', [tok.uid]));
   if (!user) throw new HttpError(401, 'Sign in required');
-  const admin = () => { if (user.role !== 'admin') throw new HttpError(403, 'Admin only'); };
+  const permissions = user.role === 'admin' ? null : parsePermissions(user.permissions);
+  const hasCustomPermissions = Boolean(user.permissions && user.permissions !== '{}');
+  const can = (area, action) => user.role === 'admin' || permissions[area]?.[action] === true;
+  const canPrintAny = () => user.role === 'admin' || Object.keys(PERMISSION_AREAS).some((area) => can(area, 'print'));
+  const requirePermission = (area, action) => { if (!can(area, action)) throw new HttpError(403, `Missing ${action} permission for ${area.replaceAll('_', ' ')}`); };
+  const grantPermissions = (value, existing = null) => {
+    const granted = validatePermissions(value);
+    const current = existing ? parsePermissions(existing) : null;
+    if (user.role !== 'admin' && Object.entries(granted).some(([area, actions]) => PERMISSION_ACTIONS.some((permission) => actions[permission] && !can(area, permission) && current?.[area]?.[permission] !== true))) {
+      throw new HttpError(403, 'You cannot grant permissions you do not have');
+    }
+    return granted;
+  };
+  const recordArea = (kind) => kind === 'schedule' ? 'appointments_ipd' : kind === 'payment' ? 'finance_reports' : 'clinical';
+  const action = ({ GET: 'view', POST: 'create', PUT: 'edit', DELETE: 'delete' })[m];
+  const resourceArea = a === 'records' ? null : Object.entries(PERMISSION_AREAS).find(([, resources]) => resources.includes(a))?.[0];
+  if (a === 'auth') {
+    if (b !== 'me' && b !== 'password') throw new HttpError(404, 'Not found');
+  } else if (a === 'clinic' && b === 'print') {
+    if (m !== 'GET') throw new HttpError(405, 'Method not allowed');
+    if (!canPrintAny()) throw new HttpError(403, 'Missing print permission');
+  } else if (a === 'clinic') {
+    requirePermission('clinic_settings', m === 'GET' ? 'view' : 'edit');
+  } else if (a === 'users') {
+    requirePermission('user_management', action || 'view');
+  } else if (a === 'medicines' && (b === 'codes' || c === 'code')) {
+    requirePermission('pharmacy_services', 'view');
+    requirePermission('pharmacy_services', 'print');
+  } else if (a === 'export') {
+    if (!canPrintAny()) throw new HttpError(403, 'Missing print permission');
+  } else if (a === 'sales') {
+    if (m === 'GET' && user.role !== 'admin' && !can('pharmacy_services', 'view') && !can('finance_reports', 'view')) {
+      throw new HttpError(403, 'Missing sales view permission');
+    }
+    if (m !== 'GET') requirePermission('pharmacy_services', action || 'view');
+  } else if (a === 'reports' && b === 'medicine-sales') {
+    requirePermission('pharmacy_services', 'view');
+  } else if (a === 'reports' || a === 'expenses') {
+    requirePermission('finance_reports', action || 'view');
+  } else if (a === 'dashboard') {
+    if (user.role !== 'admin' && !['patients', 'appointments_ipd', 'finance_reports'].some((area) => can(area, 'view'))) {
+      throw new HttpError(403, 'Missing dashboard view permission');
+    }
+  } else if ((a === 'uploads' || a === 'echo-uploads') && m === 'POST') {
+    const areas = a === 'echo-uploads' ? ['clinical'] : ['patients', 'clinical', 'staff_payroll', 'pharmacy_services', 'clinic_settings'];
+    if (user.role !== 'admin' && !areas.some((area) => can(area, 'create') || can(area, 'edit'))) throw new HttpError(403, 'Missing upload permission');
+  } else if (a === 'ocr') {
+    requirePermission('clinical', action || 'view');
+  } else if (a === 'records' && m === 'GET' && !b) {
+    const kind = url.searchParams.get('kind');
+    if (kind) requirePermission(recordArea(kind), 'view');
+    else if (user.role !== 'admin' && !['clinical', 'appointments_ipd', 'finance_reports'].some((area) => can(area, 'view'))) {
+      throw new HttpError(403, 'Missing records view permission');
+    }
+  } else if (resourceArea && !(a === 'patients' && c === 'portal')) {
+    const imports = b === 'import' || b === 'import-xlsx';
+    requirePermission(resourceArea, imports ? 'create' : action || 'view');
+  }
 
-  if (a === 'auth' && b === 'me' && m === 'GET') return send(res, 200, user);
+  if (a === 'auth' && b === 'me' && m === 'GET') return send(res, 200, { id: user.id, email: user.email, name: user.name, role: user.role, permissions, permissions_custom: hasCustomPermissions });
+
+  if (a === 'patients' && b && c === 'portal') {
+    const patientId = Number(b);
+    if (!Number.isInteger(patientId) || patientId < 1) throw new HttpError(404, 'Patient not found');
+    const patient = await queryOne('SELECT id FROM patients WHERE id=$1', [patientId]);
+    if (!patient) throw new HttpError(404, 'Patient not found');
+    if (m === 'POST') {
+      requirePermission('patients', 'print');
+      const body = await readJson(req);
+      let origin;
+      try { origin = new URL(String(body.portal_origin || '')); } catch { throw bad('portal_origin must be a valid web origin'); }
+      if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash ||
+          (origin.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(origin.hostname))) {
+        throw bad('portal_origin must be an HTTPS origin (HTTP is allowed only on localhost)');
+      }
+      if (req.headers.origin) {
+        let requestOrigin;
+        try { requestOrigin = new URL(req.headers.origin).origin; } catch { throw bad('Request origin is invalid'); }
+        if (requestOrigin !== origin.origin) throw bad('portal_origin must match the requesting application origin');
+      }
+      const token = crypto.randomBytes(32).toString('base64url');
+      await query('INSERT INTO patient_portal_tokens(patient_id,token_hash) VALUES($1,$2)', [patientId, patientPortalTokenHash(token)]);
+      const portalUrl = `${origin.origin}/portal.html#${token}`;
+      const qr = await QRCode.toDataURL(portalUrl, { errorCorrectionLevel: 'M', margin: 1, width: 320 });
+      return send(res, 201, { portal_url: portalUrl, qr });
+    }
+    if (m === 'DELETE') {
+      requirePermission('patients', 'edit');
+      await query('UPDATE patient_portal_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE patient_id=$1 AND revoked_at IS NULL', [patientId]);
+      return send(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
 
   if (a === 'auth' && b === 'password' && m === 'POST') {
     const body = await readJson(req), key = 'pw|' + user.id;
@@ -527,36 +752,81 @@ async function api(req, res, url) {
     return res.end(data);
   }
 
+  if (a === 'clinic' && b === 'print' && m === 'GET') {
+    return send(res, 200, await queryOne(`SELECT name,specialty,address,phone,currency,rate,logo,qr,banner,footer_banner,footer_banner_text,footer_banner_mode,show_name,show_address,show_phone,print_header,print_footer,print_template FROM clinic WHERE id=1`));
+  }
+
   if (a === 'clinic' && !b) {
     const row = () => queryOne('SELECT * FROM clinic WHERE id=1');
-    if (m === 'GET') return send(res, 200, await row());
+    if (m === 'GET') { requirePermission('clinic_settings', 'view'); return send(res, 200, await row()); }
     if (m === 'PUT') {
-      admin();
+      requirePermission('clinic_settings', 'edit');
       const d = clean(null, await readJson(req), true, CLINIC), cols = Object.keys(d);
       if (!cols.length) throw bad('Nothing to update');
+      if ('footer_banner_mode' in d && !['image', 'text'].includes(d.footer_banner_mode)) throw bad('Footer mode must be image or text');
       const old = await row();
       await query(`UPDATE clinic SET ${cols.map((x, i) => `"${x}"=$${i + 1}`).join(',')},updated_at=CURRENT_TIMESTAMP WHERE id=1`, cols.map((x) => d[x]));
-      for (const k of ['logo', 'qr', 'banner']) if (k in d && old[k] !== d[k]) await dropFile(old[k]);
+      for (const k of ['logo', 'qr', 'banner', 'footer_banner']) if (k in d && old[k] !== d[k]) await dropFile(old[k]);
       return send(res, 200, await row());
     }
   }
 
   if (a === 'users') {
-    admin();
-    if (!b && m === 'GET') return send(res, 200, await queryAll('SELECT id,email,name,role,created_at FROM users ORDER BY id'));
+    if (!b && m === 'GET') {
+      requirePermission('user_management', 'view');
+      const users = await queryAll('SELECT id,email,name,role,permissions,created_at FROM users ORDER BY id');
+      return send(res, 200, users.map((item) => ({ ...item, permissions: item.role === 'admin' ? null : parsePermissions(item.permissions) })));
+    }
     if (!b && m === 'POST') {
+      requirePermission('user_management', 'create');
       const body = await readJson(req), email = String(body.email || '').trim().toLowerCase();
       if (!isEmail(email)) throw bad('Enter a valid email');
       if (String(body.password || '').length < 8) throw bad('Password must be at least 8 characters');
-      if (!['admin', 'staff'].includes(body.role || 'staff')) throw bad('role must be admin or staff');
+      if (body.role && body.role !== 'staff') throw bad('New accounts must use the staff role');
       if (await queryOne('SELECT 1 FROM users WHERE email=$1', [email])) throw new HttpError(409, 'Email already in use');
-      const r = await queryOne('INSERT INTO users(email,name,role,pass) VALUES($1,$2,$3,$4) RETURNING id',
-        [email, String(body.name || email.split('@')[0]).slice(0, 100), body.role || 'staff', await hashPw(String(body.password))]);
-      return send(res, 201, { id: r.id, email });
+      if (body.permissions === undefined && user.role !== 'admin') throw bad('Custom permissions are required');
+      const access = body.permissions === undefined ? null : grantPermissions(body.permissions);
+      const r = await queryOne('INSERT INTO users(email,name,role,permissions,pass) VALUES($1,$2,$3,$4,$5) RETURNING id',
+        [email, String(body.name || email.split('@')[0]).slice(0, 100), 'staff', JSON.stringify(access || {}), await hashPw(String(body.password))]);
+      return send(res, 201, { id: r.id, email, name: String(body.name || email.split('@')[0]).slice(0, 100), role: 'staff', permissions: access || defaultStaffPermissions() });
+    }
+    if (b && m === 'PUT') {
+      requirePermission('user_management', 'edit');
+      const id = Number(b);
+      if (!Number.isInteger(id) || id < 1) throw bad('Invalid user ID');
+      if (id === user.id && user.role !== 'admin') throw bad('You cannot change your own permissions');
+      const target = await queryOne('SELECT id,role,permissions FROM users WHERE id=$1', [id]);
+      if (!target) throw new HttpError(404, 'Not found');
+      if (target.role === 'admin' && user.role !== 'admin') throw new HttpError(403, 'Administrator accounts cannot be edited here');
+      const body = await readJson(req), fields = [], values = [];
+      if (body.email !== undefined) {
+        const email = String(body.email).trim().toLowerCase();
+        if (!isEmail(email)) throw bad('Enter a valid email');
+        if (await queryOne('SELECT id FROM users WHERE email=$1 AND id<>$2', [email, id])) throw new HttpError(409, 'Email already in use');
+        fields.push(`email=$${fields.length + 1}`); values.push(email);
+      }
+      if (body.name !== undefined) { fields.push(`name=$${fields.length + 1}`); values.push(String(body.name).slice(0, 100)); }
+      if (body.password !== undefined && String(body.password)) {
+        if (String(body.password).length < 8) throw bad('Password must be at least 8 characters');
+        fields.push(`pass=$${fields.length + 1}`); values.push(await hashPw(String(body.password)));
+      }
+      if (body.permissions !== undefined) {
+        if (target.role === 'admin') throw bad('Administrator permissions are fixed');
+        fields.push(`permissions=$${fields.length + 1}`); values.push(JSON.stringify(grantPermissions(body.permissions, target.permissions)));
+      }
+      if (!fields.length) throw bad('Nothing to update');
+      values.push(id);
+      const updated = await queryOne(`UPDATE users SET ${fields.join(',')} WHERE id=$${values.length} RETURNING id,email,name,role,permissions,created_at`, values);
+      return send(res, 200, { ...updated, permissions: updated.role === 'admin' ? null : parsePermissions(updated.permissions) });
     }
     if (b && m === 'DELETE') {
-      if (Number(b) === user.id) throw bad('You cannot delete your own account');
-      const r = await query('DELETE FROM users WHERE id=$1', [Number(b)]);
+      requirePermission('user_management', 'delete');
+      const id = Number(b);
+      if (!Number.isInteger(id) || id < 1) throw bad('Invalid user ID');
+      if (id === user.id) throw bad('You cannot delete your own account');
+      const target = await queryOne('SELECT role FROM users WHERE id=$1', [id]);
+      if (target?.role === 'admin') throw bad('Administrator accounts cannot be deleted here');
+      const r = await query('DELETE FROM users WHERE id=$1', [id]);
       if (!r.rowCount) throw new HttpError(404, 'Not found');
       return send(res, 200, { ok: true });
     }
@@ -590,7 +860,7 @@ async function api(req, res, url) {
     return send(res, 201, sale);
   }
   if (a === 'sales' && b && c === 'items' && d && m === 'DELETE') {
-    admin();
+    requirePermission('pharmacy_services', 'delete');
     const saleId = Number(b), itemId = Number(d);
     if (!Number.isInteger(saleId) || saleId < 1 || !Number.isInteger(itemId) || itemId < 1) throw bad('Invalid sale item');
     await tx(async (client) => {
@@ -636,10 +906,10 @@ async function api(req, res, url) {
     return send(res, 200, rows);
   }
   if (a === 'dashboard' && m === 'GET') {
-    const pCount = (await queryOne('SELECT COUNT(*)::int n FROM patients'))?.n || 0;
-    const apptCount = (await queryOne("SELECT COUNT(*)::int n FROM appointments WHERE date = TO_CHAR(NOW() + ($1 || ' hours')::interval, 'YYYY-MM-DD')", [String(tzh)]))?.n || 0;
-    const revToday = (await queryOne("SELECT COALESCE(SUM(total),0)::int n FROM sales WHERE TO_CHAR(created_at + ($1 || ' hours')::interval, 'YYYY-MM-DD') = TO_CHAR(NOW() + ($1 || ' hours')::interval, 'YYYY-MM-DD')", [String(tzh)]))?.n || 0;
-    const ipdCount = (await queryOne('SELECT COUNT(*)::int n FROM ipd WHERE "out"=0'))?.n || 0;
+    const pCount = can('patients', 'view') ? (await queryOne('SELECT COUNT(*)::int n FROM patients'))?.n || 0 : 0;
+    const apptCount = can('appointments_ipd', 'view') ? (await queryOne("SELECT COUNT(*)::int n FROM appointments WHERE date = TO_CHAR(NOW() + ($1 || ' hours')::interval, 'YYYY-MM-DD')", [String(tzh)]))?.n || 0 : 0;
+    const revToday = can('finance_reports', 'view') ? (await queryOne("SELECT COALESCE(SUM(total),0)::int n FROM sales WHERE TO_CHAR(created_at + ($1 || ' hours')::interval, 'YYYY-MM-DD') = TO_CHAR(NOW() + ($1 || ' hours')::interval, 'YYYY-MM-DD')", [String(tzh)]))?.n || 0 : 0;
+    const ipdCount = can('appointments_ipd', 'view') ? (await queryOne('SELECT COUNT(*)::int n FROM ipd WHERE "out"=0'))?.n || 0 : 0;
     return send(res, 200, {
       patients: pCount,
       appointmentsToday: apptCount,
@@ -648,11 +918,12 @@ async function api(req, res, url) {
     });
   }
 
-  if (a === 'uploads' && !b && m === 'POST') {
+  if ((a === 'uploads' || a === 'echo-uploads') && !b && m === 'POST') {
     const type = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
     const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[type];
     if (!ext) throw new HttpError(415, 'Use a JPG, PNG or WebP picture');
-    const buf = await readRaw(req, 2e6);
+    const echoReport = a === 'echo-uploads';
+    const buf = await readRaw(req, echoReport ? 10e6 : 2e6, echoReport ? 'Picture is too large (max 10 MB)' : undefined);
     const magic = ext === 'jpg' ? buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff
       : ext === 'png' ? buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
       : buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP';
@@ -714,6 +985,75 @@ async function api(req, res, url) {
       });
     }
     return send(res, 201, { imported: await importServices(rows) });
+  }
+
+  if (a === 'patients' && b === 'import-xlsx' && m === 'POST') {
+    const buffer = await readRaw(req, 1e6, 'Excel workbook is too large (max 1 MB)');
+    let workbook;
+    try { workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(buffer); }
+    catch { throw bad('Invalid Excel workbook'); }
+    const sheet = workbook.worksheets[0];
+    if (!sheet || sheet.rowCount < 2) throw bad('Excel workbook must include a header and at least one patient');
+    if (sheet.rowCount > 1001) throw bad('Excel workbook can contain up to 1,000 patients');
+    const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const headers = sheet.getRow(1).values.slice(1).map(normalize);
+    const aliases = {
+      name: ['name', 'patientname'],
+      latin_name: ['latinname'],
+      age: ['age'],
+      age_unit: ['ageunit'],
+      dob: ['dob', 'dateofbirth', 'birthdate'],
+      sex: ['sex', 'gender'],
+      phone: ['phone', 'telephone'],
+      addr: ['addr', 'address'],
+      type: ['type', 'patienttype'],
+      room: ['room'],
+      bed: ['bed'],
+      unpaid: ['unpaid'],
+      khmer: ['khmer'],
+      nssf: ['nssf'],
+      pet: ['pet'],
+      follow_up: ['followup'],
+      diagnosis: ['diagnosis'],
+      nssf_id: ['nssfid'],
+      national_id: ['nationalid'],
+      complaints: ['complaints'],
+      history: ['history', 'medicalhistory'],
+      reg_date: ['regdate', 'registrationdate'],
+      photo: ['photo'],
+    };
+    const columns = Object.fromEntries(Object.entries(aliases).map(([key, names]) => [key, headers.findIndex((header) => names.includes(header))]));
+    if (columns.name < 0) throw bad('Excel workbook needs a patient name column');
+    const dateValue = (value) => {
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 2958465) {
+        return new Date(Date.UTC(1899, 11, 30) + value * 86400000).toISOString().slice(0, 10);
+      }
+      return value;
+    };
+    const booleanValue = (value, rowNumber, key) => {
+      if (value == null || value === '') return undefined;
+      if (typeof value === 'boolean') return value;
+      const normalized = String(value).trim().toLowerCase();
+      if (['1', 'yes', 'true'].includes(normalized)) return true;
+      if (['0', 'no', 'false'].includes(normalized)) return false;
+      throw bad(`Row ${rowNumber}: ${key} must be Yes or No`);
+    };
+    const rows = [];
+    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+      const values = sheet.getRow(rowNumber).values.slice(1);
+      if (!values.some((value) => value != null && String(value).trim())) continue;
+      const row = { rowNumber };
+      for (const [key, index] of Object.entries(columns)) {
+        if (index < 0 || values[index] == null || values[index] === '') continue;
+        const value = ['dob', 'reg_date'].includes(key) ? dateValue(values[index]) : values[index];
+        row[key] = ['unpaid', 'khmer', 'nssf', 'pet', 'follow_up'].includes(key)
+          ? booleanValue(value, rowNumber, key)
+          : value;
+      }
+      rows.push(row);
+    }
+    return send(res, 201, { imported: await importPatients(rows) });
   }
 
   if (a === 'medicines' && b === 'import-xlsx' && m === 'POST') {
@@ -894,6 +1234,16 @@ async function api(req, res, url) {
           if (amount('deduction_cents') > amount('basic_cents') + amount('position_allowance_cents') + amount('overtime_cents') + amount('benefits_cents')) throw bad('deduction_cents cannot exceed total earnings');
         }
       }
+      if (a === 'leaves') {
+        const existing = id ? await queryOne('SELECT start_date,end_date,status FROM leaves WHERE id=$1', [id]) : null;
+        const start = d.start_date || existing?.start_date, end = d.end_date || existing?.end_date;
+        if ((creating || 'start_date' in d) && !isISODate(start)) throw bad('start_date must be a valid date');
+        if ((creating || 'end_date' in d) && !isISODate(end)) throw bad('end_date must be a valid date');
+        if (start && end && start > end) throw bad('end_date must not be before start_date');
+        if ('leave_type' in d && !['Annual', 'Sick', 'Personal', 'Maternity', 'Other'].includes(d.leave_type)) throw bad('leave_type is not valid');
+        if ('status' in d && !['Pending', 'Approved', 'Rejected'].includes(d.status)) throw bad('status is not valid');
+        if (creating && !d.status) throw bad('status is required');
+      }
     };
     const needPatient = async (d, must) => {
       if (a === 'records') {
@@ -919,6 +1269,12 @@ async function api(req, res, url) {
       const offset = Math.max(0, parseInt(url.searchParams.get('offset')) || 0);
       const conds = [], params = [];
       let pIdx = 1;
+      if (a === 'records' && user.role !== 'admin' && !url.searchParams.has('kind')) {
+        const allowedKinds = KINDS.filter((kind) => can(recordArea(kind), 'view'));
+        if (!allowedKinds.length) throw new HttpError(403, 'Missing records view permission');
+        conds.push(`kind IN (${allowedKinds.map(() => `$${pIdx++}`).join(',')})`);
+        params.push(...allowedKinds);
+      }
       if (q) {
         conds.push('(' + R.search.map((c) => `"${c}" ILIKE $${pIdx++}`).join(' OR ') + ')');
         const escaped = '%' + q.replace(/[\\%_]/g, '\\$&') + '%';
@@ -937,6 +1293,7 @@ async function api(req, res, url) {
     }
     if (id === null && m === 'POST') {
       const d = withUser(clean(a, await readJson(req), false));
+      if (a === 'records') requirePermission(recordArea(d.kind), 'create');
       await validateResource(d, true);
       await needPatient(d, true);
       const cols = Object.keys(d);
@@ -948,13 +1305,18 @@ async function api(req, res, url) {
     if (id !== null && m === 'GET') {
       const row = await queryOne(`SELECT * FROM "${a}" WHERE id=$1`, [id]);
       if (!row) throw new HttpError(404, 'Not found');
+      if (a === 'records') requirePermission(recordArea(row.kind), 'view');
       return send(res, 200, row);
     }
     if (id !== null && m === 'PUT') {
       const d = withUser(clean(a, await readJson(req), true));
+      if (a === 'records') {
+        const existing = await queryOne('SELECT kind FROM records WHERE id=$1', [id]);
+        if (!existing) throw new HttpError(404, 'Not found');
+        requirePermission(recordArea(d.kind || existing.kind), 'edit');
+      }
       await validateResource(d, false);
       await needPatient(d, false);
-      if (a === 'chat') admin();
       const cols = Object.keys(d).filter((x) => names.includes(x));
       if (!cols.length) throw bad('Nothing to update');
       const imgs = names.filter((n) => IMG.includes(n));
@@ -969,13 +1331,22 @@ async function api(req, res, url) {
     if (id !== null && m === 'DELETE') {
       if (a === 'doctors' && await queryOne('SELECT 1 FROM payslips WHERE doctor_id=$1 LIMIT 1', [id])) throw new HttpError(409, 'Delete the doctor’s payslips before deleting the doctor');
       if (a === 'records') {
-        const row = await queryOne('SELECT created_by FROM records WHERE id=$1', [id]);
-        if (row && user.role !== 'admin' && row.created_by !== user.id) throw new HttpError(403, 'Only the author or an admin can delete this record');
-      } else admin();
+        const row = await queryOne('SELECT created_by,kind FROM records WHERE id=$1', [id]);
+        if (row) {
+          const area = recordArea(row.kind);
+          if (!can(area, 'delete') && !(user.role !== 'admin' && !hasCustomPermissions && row.created_by === user.id)) {
+            requirePermission(area, 'delete');
+          }
+        }
+        if (row && user.role !== 'admin' && !hasCustomPermissions && row.created_by !== user.id) throw new HttpError(403, 'Only the author or an admin can delete this record');
+      }
       const imgs = names.filter((n) => IMG.includes(n));
       const old = imgs.length ? await queryOne(`SELECT ${imgs.map((q) => `"${q}"`).join(',')} FROM "${a}" WHERE id=$1`, [id]) : null;
       const recImgs = a === 'patients' ? (await queryAll("SELECT image FROM records WHERE patient_id=$1 AND image<>''", [id])).map((x) => x.image) : [];
       if (a === 'patients') {
+        const linkedKinds = await queryAll('SELECT DISTINCT kind FROM records WHERE patient_id=$1', [id]);
+        for (const row of linkedKinds) requirePermission(recordArea(row.kind), 'delete');
+        if (await queryOne('SELECT 1 FROM appointments WHERE patient_id=$1 LIMIT 1', [id])) requirePermission('appointments_ipd', 'delete');
         await query('DELETE FROM records WHERE patient_id=$1', [id]);
         await query('DELETE FROM appointments WHERE patient_id=$1', [id]);
       }

@@ -11,8 +11,8 @@ const { close } = require('./db');
 server.listen(0, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${server.address().port}`;
   let token = null, medicineSaleItem = null, medicineSaleId = null;
-  const call = async (method, url, body, tk = token) => {
-    const r = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...(tk ? { Authorization: 'Bearer ' + tk } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const call = async (method, url, body, tk = token, extraHeaders = {}) => {
+    const r = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...(tk ? { Authorization: 'Bearer ' + tk } : {}), ...extraHeaders }, body: body ? JSON.stringify(body) : undefined });
     return { status: r.status, body: await r.json().catch(() => null), headers: r.headers };
   };
   const ok = (name) => console.log('  ✓', name);
@@ -33,6 +33,29 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('POST', '/api/patients', { name: "Robert'); DROP TABLE patients;--" })).status, 201); ok('SQL injection stored as plain text');
     const list = await call('GET', '/api/patients?q=' + encodeURIComponent('%')); assert.equal(list.body.length, 0); ok('LIKE wildcards are escaped');
     assert.equal((await call('GET', '/api/patients?q=sok')).body.length, 1); ok('search works');
+    const patientWorkbook = new ExcelJS.Workbook(), patientSheet = patientWorkbook.addWorksheet('Patients');
+    patientSheet.addRow(['Patient Name', 'Latin Name', 'Age', 'Age Unit', 'Date of Birth', 'Gender', 'Phone', 'Address', 'Type', 'NSSF', 'Follow Up', 'NSSF ID', 'National ID', 'Complaints', 'History', 'Registration Date']);
+    patientSheet.addRow(['Excel Patient', 'Patient Latin', 35, 'Y', new Date('1991-04-03T00:00:00Z'), 'F', '012345678', 'Phnom Penh', 'OPD', 'Yes', 'No', 'NSSF-123', 'NAT-456', 'Headache', 'No known allergies', new Date('2026-10-25T00:00:00Z')]);
+    const patientBytes = Buffer.from(await patientWorkbook.xlsx.writeBuffer());
+    const patientImport = await fetch(base + '/api/patients/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Authorization: 'Bearer ' + token },
+      body: patientBytes,
+    });
+    assert.equal(patientImport.status, 201); assert.equal((await patientImport.json()).imported, 1);
+    const importedPatient = (await call('GET', '/api/patients?q=Excel%20Patient')).body[0];
+    assert.ok(importedPatient); assert.equal(importedPatient.latin_name, 'Patient Latin'); assert.equal(importedPatient.age, 35);
+    assert.equal(importedPatient.dob, '1991-04-03'); assert.equal(importedPatient.sex, 'F'); assert.equal(importedPatient.nssf, 1);
+    assert.equal(importedPatient.follow_up, 0); assert.equal(importedPatient.reg_date, '2026-10-25'); ok('patient Excel import maps fields and converts dates and yes/no values');
+    const invalidPatientBook = new ExcelJS.Workbook(), invalidPatientSheet = invalidPatientBook.addWorksheet('Patients');
+    invalidPatientSheet.addRow(['Name', 'Age']); invalidPatientSheet.addRow(['Must roll back', 20]); invalidPatientSheet.addRow(['Invalid patient', 151]);
+    const invalidPatientImport = await fetch(base + '/api/patients/import-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Authorization: 'Bearer ' + token },
+      body: Buffer.from(await invalidPatientBook.xlsx.writeBuffer()),
+    });
+    assert.equal(invalidPatientImport.status, 400);
+    assert.equal((await call('GET', '/api/patients?q=' + encodeURIComponent('Must roll back'))).body.length, 0); ok('invalid patient Excel import reports errors and inserts no partial rows');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { phone: '012 345 678' })).body.phone, '012 345 678'); ok('update patient');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { diagnosis: 'New API Diagnosis' })).body.diagnosis, 'New API Diagnosis');
     assert.equal((await call('GET', `/api/patients/${p.body.id}`)).body.diagnosis, 'New API Diagnosis');
@@ -194,6 +217,12 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await up(PNG, 'image/png', null)).status, 401); ok('upload needs sign-in');
     assert.equal((await up(Buffer.from('<svg onload=alert(1)>'), 'image/svg+xml')).status, 415); ok('SVG / non-image types refused');
     assert.equal((await up(Buffer.from('not an image'), 'image/png')).status, 400); ok('fake picture (wrong signature) refused');
+    assert.equal((await up(Buffer.alloc(2e6 + 1), 'image/png')).status, 413); ok('regular image uploads remain limited to 2 MB');
+    const echoUpload = async (buf) => fetch(base + '/api/echo-uploads', { method: 'POST', headers: { 'Content-Type': 'image/png', Authorization: 'Bearer ' + token }, body: buf });
+    const largePng = Buffer.alloc(10e6); PNG.copy(largePng);
+    const echoImage = await echoUpload(largePng);
+    assert.equal(echoImage.status, 201); ok('Echo report accepts images up to 10 MB');
+    assert.equal((await echoUpload(Buffer.concat([largePng, Buffer.alloc(1)]))).status, 413); ok('Echo report rejects images larger than 10 MB');
     const pj = await (await up(PNG, 'image/png')).json(); assert.match(pj.photo, /^[a-f0-9]{32}\.png$/); ok('picture uploaded');
     const img = await fetch(base + '/uploads/' + pj.photo); assert.equal(img.status, 200); assert.equal(img.headers.get('content-type'), 'image/png'); ok('picture is served');
     assert.equal((await call('POST', '/api/medicines', { name: 'Bad', photo: '../../etc/passwd' })).status, 400); ok('photo name validated');
@@ -208,6 +237,15 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('POST', '/api/payslips', payslip)).status, 400); ok('payslip saves salary breakdown and rejects duplicate month');
     assert.equal((await call('POST', '/api/payslips', { ...payslip, period_month: 11 })).status, 400);
     assert.equal((await call('DELETE', `/api/doctors/${dr.id}`)).status, 409); ok('payslip period is validated and payroll history protects doctor record');
+    const leave = { employee_name: 'Nurse Test', leave_type: 'Annual', start_date: '2026-11-02', end_date: '2026-11-04', reason: 'Family event', status: 'Pending' };
+    const savedLeave = await call('POST', '/api/leaves', leave);
+    assert.equal(savedLeave.status, 201); assert.equal(savedLeave.body.status, 'Pending');
+    assert.equal((await call('POST', '/api/leaves', { ...leave, leave_type: 'Invalid' })).status, 400);
+    assert.equal((await call('POST', '/api/leaves', { ...leave, start_date: '2026-11-05', end_date: '2026-11-04' })).status, 400);
+    assert.equal((await call('PUT', `/api/leaves/${savedLeave.body.id}`, { status: 'Approved' })).status, 200);
+    assert.equal((await call('GET', '/api/leaves')).body[0].status, 'Approved');
+    ok('leave requests persist, validate dates and type, and support status updates');
+    await call('DELETE', `/api/leaves/${savedLeave.body.id}`);
     assert.equal((await up(Buffer.alloc(2.5e6, 1), 'image/png')).status, 413); ok('oversized picture refused');
     await call('DELETE', `/api/medicines/${withPic.id}`); assert.equal((await fetch(base + '/uploads/' + pj.photo)).status, 200); ok('picture kept while another record uses it');
     await call('DELETE', `/api/payslips/${savedPayslip.body.id}`);
@@ -215,6 +253,31 @@ server.listen(0, '127.0.0.1', async () => {
     const staff = await call('POST', '/api/users', { email: 'nurse@clinic.test', password: 'password123', role: 'staff' }); assert.equal(staff.status, 201);
     const st = (await call('POST', '/api/auth/login', { email: 'nurse@clinic.test', password: 'password123' })).body.token;
     assert.equal((await call('POST', '/api/symptoms', { name: 'Cough' }, st)).status, 201); ok('staff can create');
+    const limitedUser = await call('POST', '/api/users', { email: 'limited@clinic.test', password: 'password123', permissions: { patients: { view: true } } });
+    assert.equal(limitedUser.status, 201); assert.equal(limitedUser.body.permissions.patients.view, true); assert.equal(limitedUser.body.permissions.patients.create, false);
+    const limitedToken = (await call('POST', '/api/auth/login', { email: 'limited@clinic.test', password: 'password123' })).body.token;
+    assert.equal((await call('GET', '/api/patients', null, limitedToken)).status, 200);
+    assert.equal((await call('GET', '/api/leaves', null, limitedToken)).status, 403);
+    assert.equal((await call('POST', '/api/patients', { name: 'Denied' }, limitedToken)).status, 403);
+    assert.equal((await call('GET', '/api/appointments', null, limitedToken)).status, 403);
+    assert.equal((await call('GET', '/api/diagnoses', null, limitedToken)).status, 403);
+    assert.equal((await call('GET', `/api/medicines/${med.id}/code/qr`, null, limitedToken)).status, 403);
+    assert.equal((await call('GET', '/api/users', null, limitedToken)).status, 403);
+    assert.equal((await call('PUT', `/api/users/${limitedUser.body.id}`, { permissions: { patients: { view: true } } }, limitedToken)).status, 403);
+    assert.equal((await call('PUT', `/api/users/${limitedUser.body.id}`, { permissions: { patients: { view: 'yes' } } })).status, 400);
+    assert.equal((await call('PUT', `/api/users/${limitedUser.body.id}`, { permissions: { patients: { view: true, create: true } } })).status, 200);
+    assert.equal((await call('PUT', `/api/users/${limitedUser.body.id}`, { name: 'Updated limited user', email: 'updated-limited@clinic.test' })).status, 200);
+    assert.equal((await call('GET', '/api/users')).body.find(item => item.id === limitedUser.body.id).name, 'Updated limited user');
+    assert.equal((await call('POST', '/api/patients', { name: 'Allowed' }, limitedToken)).status, 201);
+    ok('custom user permissions are persisted, returned on login and enforced per section and action');
+    const manager = await call('POST', '/api/users', { email: 'manager@clinic.test', password: 'password123', permissions: { patients: { view: true }, user_management: { view: true, create: true } } });
+    const managerToken = (await call('POST', '/api/auth/login', { email: 'manager@clinic.test', password: 'password123' })).body.token;
+    const managedUsers = await call('GET', '/api/users', null, managerToken); assert.equal(managedUsers.status, 200);
+    const adminUser = managedUsers.body.find(item => item.role === 'admin');
+    assert.equal((await call('PUT', `/api/users/${adminUser.id}`, { password: 'hijacked-password' }, managerToken)).status, 403);
+    assert.equal((await call('POST', '/api/users', { email: 'elevated@clinic.test', password: 'password123', permissions: { patients: { view: true, delete: true } } }, managerToken)).status, 403);
+    assert.equal((await call('POST', '/api/users', { email: 'staff-limited@clinic.test', password: 'password123', permissions: { patients: { view: true } } }, managerToken)).status, 201);
+    ok('delegated user managers cannot grant permissions they do not hold');
     assert.equal((await call('DELETE', `/api/sales/${medicineSaleId}/items/${medicineSaleItem.item_id}`, null, st)).status, 403);
     assert.equal((await call('DELETE', `/api/sales/${medicineSaleId}/items/${medicineSaleItem.item_id}`)).status, 200);
     assert.equal((await call('GET', `/api/medicines/${med.id}`)).body.stock, 10);
@@ -222,7 +285,7 @@ server.listen(0, '127.0.0.1', async () => {
     ok('admin can delete a medicine sale row and stock is restored; staff cannot');
     assert.equal((await call('DELETE', `/api/patients/${p.body.id}`, null, st)).status, 403); ok('staff cannot delete');
     assert.equal((await call('GET', '/api/users', null, st)).status, 403); ok('staff cannot list users');
-    const cl0 = (await call('GET', '/api/clinic')).body; assert.equal(cl0.currency, 'KHR'); assert.equal(cl0.rate, 4000); assert.equal(cl0.show_name, 1); ok('clinic settings have defaults');
+    const cl0 = (await call('GET', '/api/clinic')).body; assert.equal(cl0.currency, 'KHR'); assert.equal(cl0.rate, 4000); assert.equal(cl0.show_name, 1); assert.deepEqual(JSON.parse(cl0.print_template), {}); ok('clinic settings have defaults');
     assert.equal((await call('PUT', '/api/clinic', { name: 'X' }, st)).status, 403); ok('staff cannot change clinic settings');
     const cl1 = (await call('PUT', '/api/clinic', { name: 'Sovanvitou Clinic', specialty: 'Medical doctor', address: 'Phnom Penh', phone: '093 733 375', currency: 'USD', rate: '4100', show_phone: false, logo: pj.photo })).body;
     assert.equal(cl1.name, 'Sovanvitou Clinic'); assert.equal(cl1.currency, 'USD'); assert.equal(cl1.rate, 4100); assert.equal(cl1.show_phone, 0); assert.equal(cl1.logo, pj.photo); ok('admin saves clinic settings');
@@ -257,6 +320,36 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'hack' })).status, 400); assert.equal((await call('POST', '/api/records', { patient_id: 99999, kind: 'vitals' })).status, 400);
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'beu', color: 'red' })).status, 400); assert.equal((await call('POST', '/api/records', { kind: 'vitals' })).status, 400); ok('record kind, patient and colour validated');
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'medical', data: 'x'.repeat(61000) })).status, 400); assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'medical', data: '"just a string"' })).status, 400); ok('record data must be a JSON object under 60 KB');
+    await call('POST', '/api/records', { patient_id: pt.id, kind: 'schedule', title: 'Hidden appointment' });
+    await call('POST', '/api/records', { patient_id: pt.id, kind: 'payment', data: { amount: 100 } });
+    const portalLink = await call('POST', `/api/patients/${pt.id}/portal`, { portal_origin: base });
+    assert.equal(portalLink.status, 201); assert.match(portalLink.body.qr, /^data:image\/png;base64,/);
+    const portalToken = new URL(portalLink.body.portal_url).hash.slice(1);
+    assert.match(portalToken, /^[A-Za-z0-9_-]{43}$/);
+    const portalData = await call('GET', `/api/portal/${portalToken}`, null, null);
+    assert.equal(portalData.status, 200); assert.equal(portalData.body.patient.name, pt.name);
+    assert.equal(portalData.body.patient.national_id, '0123');
+    assert.ok(portalData.body.appointments.some((appointment) => appointment.type === 'Follow Up'));
+    assert.ok(portalData.body.records.some((record) => record.kind === 'vitals'));
+    assert.ok(portalData.body.records.every((record) => record.kind !== 'payment'));
+    assert.equal(JSON.stringify(portalData.body).includes(portalToken), false);
+    assert.equal((await call('POST', `/api/patients/${pt.id}/portal`, { portal_origin: 'http://example.com' })).status, 400);
+    assert.equal((await call('POST', `/api/patients/${pt.id}/portal`, { portal_origin: base }, token, { Origin: 'https://example.com' })).status, 400);
+    assert.equal((await call('POST', `/api/patients/${pt.id}/portal`, { portal_origin: base }, limitedToken)).status, 403);
+    const secondPortalLink = await call('POST', `/api/patients/${pt.id}/portal`, { portal_origin: base });
+    const secondPortalToken = new URL(secondPortalLink.body.portal_url).hash.slice(1);
+    assert.equal((await call('DELETE', `/api/patients/${pt.id}/portal`, null, limitedToken)).status, 403);
+    assert.equal((await call('DELETE', `/api/patients/${pt.id}/portal`)).status, 200);
+    assert.equal((await call('GET', `/api/portal/${portalToken}`, null, null)).status, 404);
+    assert.equal((await call('GET', `/api/portal/${secondPortalToken}`, null, null)).status, 404);
+    assert.equal((await call('GET', `/api/portal/${'A'.repeat(43)}`, null, null)).status, 404);
+    ok('patient portal QR links expose limited read-only records and can be revoked');
+    assert.equal((await call('PUT', `/api/users/${limitedUser.body.id}`, { permissions: { patients: { view: true }, clinical: { view: true } } })).status, 200);
+    const visibleRecords = await call('GET', `/api/records?patient_id=${pt.id}`, null, limitedToken);
+    assert.ok(visibleRecords.status === 200 && visibleRecords.body.every(record => !['schedule', 'payment'].includes(record.kind)));
+    assert.equal((await call('GET', `/api/records?patient_id=${pt.id}&kind=schedule`, null, limitedToken)).status, 403);
+    assert.equal((await call('GET', `/api/records?patient_id=${pt.id}&kind=payment`, null, limitedToken)).status, 403);
+    ok('mixed patient records only return types allowed by the user permission areas');
     const mine = (await call('POST', '/api/records', { patient_id: pt.id, kind: 'consultation', title: 'Staff note' }, st)).body;
     assert.equal((await call('DELETE', `/api/records/${vit.body.id}`, null, st)).status, 403); ok("staff cannot delete someone else's record");
     assert.equal((await call('DELETE', `/api/records/${mine.id}`, null, st)).status, 200); ok('staff can delete their own record');
@@ -267,11 +360,28 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 0); assert.equal((await call('GET', `/api/appointments?patient_id=${pt.id}`)).body.length, 0); assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 404); ok('deleting a patient removes their records, follow-ups and pictures');
 
     for (const kind of ['mrd', 'schedulenote', 'cnf', 'schedule', 'treatment', 'allergy', 'vaccination', 'referral', 'diagnosis_history', 'laborder', 'imagingorder']) assert.equal((await call('POST', '/api/records', { patient_id: (await call('POST', '/api/patients', { name: 'K' + kind })).body.id, kind, title: 'Standard', data: { x: 1 } })).status, 201); ok('MRD, follow-up, clinical orders, and six new patient modules are accepted');
-    const printSettings = (await call('PUT', '/api/clinic', { print_header: 'Clinic print heading', print_footer: 'Clinic contact footer' })).body;
-    assert.equal(printSettings.print_header, 'Clinic print heading'); assert.equal(printSettings.print_footer, 'Clinic contact footer');
-    const ct = (await call('PUT', '/api/clinic', { cnf_text: { acc: 'Custom wording' } })).body; assert.equal(JSON.parse(ct.cnf_text).acc, 'Custom wording'); assert.equal(JSON.parse((await call('GET', '/api/clinic')).body.cnf_text).acc, 'Custom wording'); ok('custom shared print header/footer and consultation wording save in clinic settings');
+    const printSettings = (await call('PUT', '/api/clinic', { print_header: 'Clinic print heading', print_footer: 'Clinic contact footer', print_template: { paperSize: 'A4', orientation: 'landscape', marginMm: 10, fontFamily: 'khmer', fontSizePt: 12 }, footer_banner: '0123456789abcdef0123456789abcdef.png', footer_banner_mode: 'image' })).body;
+    assert.equal(printSettings.print_header, 'Clinic print heading'); assert.equal(printSettings.print_footer, 'Clinic contact footer'); assert.equal(printSettings.footer_banner, '0123456789abcdef0123456789abcdef.png'); assert.equal(printSettings.footer_banner_mode, 'image');
+    assert.deepEqual(JSON.parse(printSettings.print_template), { paperSize: 'A4', orientation: 'landscape', marginMm: 10, fontFamily: 'khmer', fontSizePt: 12, elements: [] });
+    assert.equal((await call('PUT', '/api/clinic', { print_template: { paperSize: 'A0' } })).status, 400);
+    const printItem = { id: 'header-label', type: 'label', zone: 'header', field: 'customText', text: 'Invoice heading', x: 5, y: 10, width: 40, height: 20, fontSize: 12, bold: true, align: 'center', color: '#123456', background: 'transparent', border: true, columns: [], condition: 'always' };
+    const savedTemplate = (await call('PUT', '/api/clinic', { print_template: { elements: [printItem] } })).body;
+    assert.equal(JSON.parse(savedTemplate.print_template).elements[0].text, 'Invoice heading');
+    const printer = await call('POST', '/api/users', { email: 'printer@clinic.test', password: 'password123', permissions: { clinical: { view: true, print: true } } });
+    const printerToken = (await call('POST', '/api/auth/login', { email: 'printer@clinic.test', password: 'password123' })).body.token;
+    const printClinic = await call('GET', '/api/clinic/print', null, printerToken);
+    assert.equal(printClinic.status, 200); assert.equal(printClinic.body.print_template, savedTemplate.print_template); assert.equal(printClinic.body.print_header, 'Clinic print heading'); assert.equal('cnf_text' in printClinic.body, false);
+    assert.equal((await call('GET', '/api/clinic', null, printerToken)).status, 403);
+    assert.equal((await call('GET', '/api/clinic/print', null, limitedToken)).status, 403);
+    ok('users with print permission can load shared print settings without clinic-settings access');
+    assert.equal((await call('PUT', '/api/clinic', { print_template: { elements: [{ ...printItem, x: 90 }] } })).status, 400);
+    assert.equal((await call('PUT', '/api/clinic', { print_template: { elements: [{ ...printItem, text: '<script>' }] } })).status, 200);
+    assert.equal((await call('PUT', '/api/clinic', { footer_banner_mode: 'unknown' })).status, 400);
+    const textSettings = (await call('PUT', '/api/clinic', { footer_banner_mode: 'text', footer_banner_text: 'Clinic hours\nContact details' })).body;
+    assert.equal(textSettings.footer_banner_mode, 'text'); assert.equal(textSettings.footer_banner_text, 'Clinic hours\nContact details');
+    const ct = (await call('PUT', '/api/clinic', { cnf_text: { acc: 'Custom wording' } })).body; assert.equal(JSON.parse(ct.cnf_text).acc, 'Custom wording'); assert.equal(JSON.parse((await call('GET', '/api/clinic')).body.cnf_text).acc, 'Custom wording'); ok('clinic print text, footer image/text options, and consultation wording save in clinic settings');
     const idx = await fetch(base + '/'); assert.equal(idx.status, 200); assert.ok((await idx.text()).includes('SOVANVITOU')); ok('frontend served');
-    assert.equal((await fetch(base + '/app.js')).status, 200); assert.equal((await fetch(base + '/styles.css')).status, 200); ok('frontend script and styles served');
+    assert.equal((await fetch(base + '/app.js')).status, 200); assert.equal((await fetch(base + '/styles.css')).status, 200); assert.equal((await fetch(base + '/portal.js')).status, 200); assert.equal((await fetch(base + '/portal.html')).status, 200); ok('frontend scripts, styles, and patient portal served');
     assert.equal((await fetch(base + '/..%2fserver.js')).status, 403); ok('path traversal blocked');
     console.log('\nAll tests passed.');
     process.exitCode = 0;
