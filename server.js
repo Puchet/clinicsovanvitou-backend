@@ -19,6 +19,9 @@ const IMG = ['photo', 'logo', 'qr', 'banner', 'footer_banner', 'image'];
 const KINDS = ['vitals', 'medical', 'mdhistory', 'beu', 'schedule', 'payment', 'treatment', 'consultation', 'operation', 'investigation', 'lab', 'echo', 'xray', 'homecare', 'prescription', 'medlist', 'documents', 'mrd', 'schedulenote', 'cnf', 'allergy', 'vaccination', 'referral', 'diagnosis_history', 'laborder', 'imagingorder'];
 const USES = [['medicines', 'photo'], ['doctors', 'photo'], ['patients', 'photo'], ['clinic', 'logo'], ['clinic', 'qr'], ['clinic', 'banner'], ['clinic', 'footer_banner'], ['records', 'image']];
 const PHOTO_RE = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
+const DOCUMENT_UPLOAD_RE = /^[a-f0-9]{32}$/;
+const PATIENT_DOCUMENT_TYPES = new Set(['referral', 'referral-letter', 'treatment', 'hospital', 'medical-card', 'health', 'birth', 'medical-rest-a', 'prescription-note']);
+const DOCUMENT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 const CORS = process.env.CORS_ORIGIN || '';
 const tzh = Number.isFinite(Number(process.env.TZ_OFFSET_HOURS)) ? Number(process.env.TZ_OFFSET_HOURS) : 7;
 const TZ = `${tzh >= 0 ? '+' : ''}${tzh} hours`;
@@ -61,10 +64,38 @@ async function dropFile(name) {
   }
   fs.rm(path.join(UPLOADS, name), { force: true }, () => {});
 }
+function documentAttachment(record) {
+  try {
+    const data = JSON.parse(record?.data || '{}');
+    return data && data.attachment && DOCUMENT_UPLOAD_RE.test(data.attachment.id) ? data.attachment : null;
+  } catch { return null; }
+}
+async function dropDocumentFile(name) {
+  if (!DOCUMENT_UPLOAD_RE.test(name || '')) return;
+  const rows = await queryAll("SELECT data FROM records WHERE kind='documents' AND data LIKE $1", [`%${name}%`]);
+  if (rows.some((row) => documentAttachment(row)?.id === name)) return;
+  fs.rm(path.join(UPLOADS, name), { force: true }, () => {});
+}
 function send(res, status, body, extra = {}) {
   const data = JSON.stringify(body);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra });
   res.end(data);
+}
+function documentMime(name) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  return {
+    '.pdf': 'application/pdf',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.txt': 'text/plain; charset=utf-8',
+    '.csv': 'text/csv; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.html': 'text/html; charset=utf-8',
+  }[ext] || 'application/octet-stream';
 }
 const medicineCodeSvg = (medicine, kind) => kind === 'qr'
   ? QRCode.toString(JSON.stringify({ id: medicine.id, name: medicine.name, composition: medicine.composition }), { type: 'svg', errorCorrectionLevel: 'M', margin: 2, width: 256 })
@@ -625,6 +656,10 @@ async function api(req, res, url) {
   } else if ((a === 'uploads' || a === 'echo-uploads') && m === 'POST') {
     const areas = a === 'echo-uploads' ? ['clinical'] : ['patients', 'clinical', 'staff_payroll', 'pharmacy_services', 'clinic_settings'];
     if (user.role !== 'admin' && !areas.some((area) => can(area, 'create') || can(area, 'edit'))) throw new HttpError(403, 'Missing upload permission');
+  } else if (a === 'document-uploads') {
+    if (m === 'POST' && !b) requirePermission('clinical', 'create');
+    else if (m === 'GET' && b && !c) requirePermission('clinical', 'view');
+    else throw new HttpError(405, 'Method not allowed');
   } else if (a === 'ocr') {
     requirePermission('clinical', action || 'view');
   } else if (a === 'records' && m === 'GET' && !b) {
@@ -1201,6 +1236,62 @@ async function api(req, res, url) {
     return send(res, 201, { imported: await importEchoTemplates(rows) });
   }
 
+  if (a === 'document-uploads' && !b && m === 'POST') {
+    const patientId = Number(req.headers['x-patient-document-patient']);
+    if (!Number.isInteger(patientId) || patientId < 1) throw bad('A valid patient is required');
+    if (!(await queryOne('SELECT 1 FROM patients WHERE id=$1', [patientId]))) throw bad('Patient not found');
+    let filename;
+    try { filename = decodeURIComponent(String(req.headers['x-patient-document-name'] || '')); } catch { throw bad('File name is not valid'); }
+    filename = path.basename(filename.replace(/\\/g, '/')).replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').trim().slice(0, 255);
+    if (!filename || filename === '.' || filename === '..') throw bad('A valid file name is required');
+    const date = String(req.headers['x-patient-document-date'] || '');
+    if (!isISODate(date)) throw bad('A valid document date is required');
+    const documentType = String(req.headers['x-patient-document-type'] || '');
+    if (documentType && !PATIENT_DOCUMENT_TYPES.has(documentType)) throw bad('Document type is not valid');
+    const bytes = await readRaw(req, DOCUMENT_UPLOAD_MAX_BYTES, 'File is too large (max 25 MB)');
+    if (!bytes.length) throw bad('Choose a file to upload');
+    const attachmentId = crypto.randomBytes(16).toString('hex');
+    const attachment = { id: attachmentId, name: filename, size: bytes.length };
+    const data = documentType ? { document_type: documentType, attachment } : { attachment };
+    const record = clean('records', {
+      patient_id: patientId, kind: 'documents', title: filename, date, notes: '', data,
+    }, false);
+    record.created_by = user.id;
+    const filePath = path.join(UPLOADS, attachmentId);
+    fs.mkdirSync(UPLOADS, { recursive: true });
+    fs.writeFileSync(filePath, bytes, { flag: 'wx' });
+    try {
+      const cols = Object.keys(record), params = cols.map((key) => record[key]);
+      const sql = `INSERT INTO "records"(${cols.map((key) => `"${key}"`).join(',')}) VALUES(${cols.map((_, i) => `$${i + 1}`).join(',')}) RETURNING *`;
+      const created = await queryOne(sql, params);
+      return send(res, 201, created);
+    } catch (error) {
+      fs.rmSync(filePath, { force: true });
+      throw error;
+    }
+  }
+  if (a === 'document-uploads' && b && m === 'GET') {
+    if (!DOCUMENT_UPLOAD_RE.test(b)) throw new HttpError(404, 'Document not found');
+    const rows = await queryAll("SELECT data FROM records WHERE kind='documents' AND data LIKE $1", [`%${b}%`]);
+    const attachment = rows.map(documentAttachment).find((item) => item?.id === b);
+    const filePath = path.join(UPLOADS, b);
+    if (!attachment || !fs.existsSync(filePath)) throw new HttpError(404, 'Document not found');
+    const bytes = fs.readFileSync(filePath);
+    const safeName = encodeURIComponent(attachment.name).replace(/['()*]/g, (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase());
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const inline = parsedUrl.searchParams.get('view') === '1' || parsedUrl.searchParams.get('inline') === '1';
+    const contentType = inline ? documentMime(attachment.name) : 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': bytes.length,
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${attachment.name}"; filename*=UTF-8''${safeName}`,
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, no-store',
+    });
+    res.end(bytes);
+    return;
+  }
+
   // generic CRUD: /api/<resource>[/<id>]
   if (Object.hasOwn(RES, a)) {
     const R = RES[a], names = Object.keys(R.cols);
@@ -1320,29 +1411,44 @@ async function api(req, res, url) {
       const cols = Object.keys(d).filter((x) => names.includes(x));
       if (!cols.length) throw bad('Nothing to update');
       const imgs = names.filter((n) => IMG.includes(n));
-      const old = imgs.length ? await queryOne(`SELECT ${imgs.map((q) => `"${q}"`).join(',')} FROM "${a}" WHERE id=$1`, [id]) : null;
+      const oldCols = [...imgs, ...(a === 'records' ? ['data'] : [])];
+      const old = oldCols.length ? await queryOne(`SELECT ${oldCols.map((q) => `"${q}"`).join(',')} FROM "${a}" WHERE id=$1`, [id]) : null;
+      if (a === 'records' && d.data) {
+        const attachment = documentAttachment(old);
+        if (attachment && !documentAttachment({ data: d.data })) {
+          const nextData = JSON.parse(d.data);
+          nextData.attachment = attachment;
+          d.data = JSON.stringify(nextData);
+          if (d.data.length > 60000) throw bad('data is too long (max 60000)');
+        }
+      }
       const params = [...cols.map((x) => d[x]), id];
       const sql = `UPDATE "${a}" SET ${cols.map((x, i) => `"${x}"=$${i + 1}`).join(',')},updated_at=CURRENT_TIMESTAMP WHERE id=$${cols.length + 1} RETURNING *`;
       const updated = await queryOne(sql, params);
       if (!updated) throw new HttpError(404, 'Not found');
       if (old) for (const k of imgs) if (k in d && old[k] !== d[k]) await dropFile(old[k]);
+      if (a === 'records' && documentAttachment(old)?.id !== documentAttachment(updated)?.id) {
+        const attachment = documentAttachment(old);
+        if (attachment) await dropDocumentFile(attachment.id);
+      }
       return send(res, 200, updated);
     }
     if (id !== null && m === 'DELETE') {
       if (a === 'doctors' && await queryOne('SELECT 1 FROM payslips WHERE doctor_id=$1 LIMIT 1', [id])) throw new HttpError(409, 'Delete the doctor’s payslips before deleting the doctor');
+      let deletedRecord = null;
       if (a === 'records') {
-        const row = await queryOne('SELECT created_by,kind FROM records WHERE id=$1', [id]);
-        if (row) {
-          const area = recordArea(row.kind);
-          if (!can(area, 'delete') && !(user.role !== 'admin' && !hasCustomPermissions && row.created_by === user.id)) {
+        deletedRecord = await queryOne('SELECT created_by,kind,data FROM records WHERE id=$1', [id]);
+        if (deletedRecord) {
+          const area = recordArea(deletedRecord.kind);
+          if (!can(area, 'delete') && !(user.role !== 'admin' && !hasCustomPermissions && deletedRecord.created_by === user.id)) {
             requirePermission(area, 'delete');
           }
         }
-        if (row && user.role !== 'admin' && !hasCustomPermissions && row.created_by !== user.id) throw new HttpError(403, 'Only the author or an admin can delete this record');
+        if (deletedRecord && user.role !== 'admin' && !hasCustomPermissions && deletedRecord.created_by !== user.id) throw new HttpError(403, 'Only the author or an admin can delete this record');
       }
       const imgs = names.filter((n) => IMG.includes(n));
       const old = imgs.length ? await queryOne(`SELECT ${imgs.map((q) => `"${q}"`).join(',')} FROM "${a}" WHERE id=$1`, [id]) : null;
-      const recImgs = a === 'patients' ? (await queryAll("SELECT image FROM records WHERE patient_id=$1 AND image<>''", [id])).map((x) => x.image) : [];
+      const patientRecords = a === 'patients' ? await queryAll("SELECT image,data FROM records WHERE patient_id=$1", [id]) : [];
       if (a === 'patients') {
         const linkedKinds = await queryAll('SELECT DISTINCT kind FROM records WHERE patient_id=$1', [id]);
         for (const row of linkedKinds) requirePermission(recordArea(row.kind), 'delete');
@@ -1353,7 +1459,15 @@ async function api(req, res, url) {
       const r = await query(`DELETE FROM "${a}" WHERE id=$1`, [id]);
       if (!r.rowCount) throw new HttpError(404, 'Not found');
       if (old) for (const k of imgs) await dropFile(old[k]);
-      for (const img of recImgs) await dropFile(img);
+      for (const record of patientRecords) {
+        await dropFile(record.image);
+        const attachment = documentAttachment(record);
+        if (attachment) await dropDocumentFile(attachment.id);
+      }
+      if (deletedRecord) {
+        const attachment = documentAttachment(deletedRecord);
+        if (attachment) await dropDocumentFile(attachment.id);
+      }
       return send(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
@@ -1394,7 +1508,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' *; frame-ancestors 'none'");
   if (CORS) {
     res.setHeader('Access-Control-Allow-Origin', CORS);
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Patient-Document-Patient, X-Patient-Document-Name, X-Patient-Document-Date, X-Patient-Document-Type');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count');
     res.setHeader('Vary', 'Origin');

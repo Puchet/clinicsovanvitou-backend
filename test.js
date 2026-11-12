@@ -57,9 +57,21 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(invalidPatientImport.status, 400);
     assert.equal((await call('GET', '/api/patients?q=' + encodeURIComponent('Must roll back'))).body.length, 0); ok('invalid patient Excel import reports errors and inserts no partial rows');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { phone: '012 345 678' })).body.phone, '012 345 678'); ok('update patient');
+    assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { unpaid_remark: 'Call the family' })).body.unpaid_remark, 'Call the family');
+    assert.equal((await call('GET', `/api/patients/${p.body.id}`)).body.unpaid_remark, 'Call the family'); ok('patient unpaid remark is saved and returned');
     assert.equal((await call('PUT', `/api/patients/${p.body.id}`, { diagnosis: 'New API Diagnosis' })).body.diagnosis, 'New API Diagnosis');
     assert.equal((await call('GET', `/api/patients/${p.body.id}`)).body.diagnosis, 'New API Diagnosis');
     assert.equal((await call('GET', '/api/patients?q=' + encodeURIComponent('New API Diagnosis'))).body[0].id, p.body.id); ok('patient diagnosis is saved and searchable');
+    const prescriptionMeds = Array.from({ length: 4 }, (_, index) => ({
+      medicine_id: index + 1, name: `Medicine ${index + 1}`, morning: '1 tablet', noon: '', evening: '',
+      duration: '5', quantity: '5', instruction: 'After meal',
+    }));
+    const prescriptionTemplate = await call('POST', '/api/prescriptions', {
+      name: 'Four medicine template', meds: JSON.stringify(prescriptionMeds),
+    });
+    assert.equal(prescriptionTemplate.status, 201);
+    assert.equal(JSON.parse(prescriptionTemplate.body.meds).length, 4);
+    ok('prescription templates can save more than three medicines');
     assert.equal((await call('GET', '/api/patients/99999')).status, 404); ok('404 for missing record');
     const sampleFile = await call('POST', '/api/files', { name: 'Clinic letter', content: '<p onclick="x()">Clinic <strong>hours</strong></p><script>alert(1)</script><img src="javascript:alert(1)">' });
     assert.equal(sampleFile.status, 201);
@@ -303,6 +315,40 @@ server.listen(0, '127.0.0.1', async () => {
     const long = 'x'.repeat(1200);
     const pt = (await call('POST', '/api/patients', { name: 'សុខ ដារា', latin_name: 'Sok Dara', phone: '012 111 222', age: 14, age_unit: 'M', sex: 'F', khmer: true, nssf: true, pet: false, nssf_id: 'N-1', national_id: '0123', complaints: long, history: 'None', reg_date: '2026-10-14T08:47', type: 'OPD' })).body;
     assert.equal(pt.latin_name, 'Sok Dara'); assert.equal(pt.nssf, 1); assert.equal(pt.khmer, 1); assert.equal(pt.pet, 0); assert.equal(pt.complaints.length, 1200); assert.equal(pt.age_unit, 'M'); ok('full patient registration saved (long text, flags, age unit)');
+    assert.equal((await fetch(base + '/api/document-uploads', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Patient-Document-Patient': String(pt.id), 'X-Patient-Document-Name': 'report.pdf', 'X-Patient-Document-Date': '2026-10-14' }, body: Buffer.from('unauthorized') })).status, 401);
+    const documentBytes = Buffer.from('%PDF-1.7 test document');
+    const uploadedDocumentResponse = await fetch(base + '/api/document-uploads', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + token,
+        'X-Patient-Document-Patient': String(pt.id), 'X-Patient-Document-Name': encodeURIComponent('patient report.pdf'),
+        'X-Patient-Document-Date': '2026-10-14', 'X-Patient-Document-Type': 'health',
+      },
+      body: documentBytes,
+    });
+    assert.equal(uploadedDocumentResponse.status, 201);
+    const uploadedDocument = await uploadedDocumentResponse.json(), attachment = JSON.parse(uploadedDocument.data).attachment;
+    assert.equal(uploadedDocument.title, 'patient report.pdf'); assert.equal(JSON.parse(uploadedDocument.data).document_type, 'health');
+    assert.equal(attachment.size, documentBytes.length);
+    const updatedDocument = await call('PUT', `/api/records/${uploadedDocument.id}`, { data: { document_type: 'health', health_advice: 'Updated advice' } });
+    assert.equal(JSON.parse(updatedDocument.body.data).attachment.id, attachment.id);
+    assert.equal((await fetch(base + '/api/document-uploads/' + attachment.id)).status, 401);
+    assert.equal((await call('GET', '/api/document-uploads/' + attachment.id, null, limitedToken)).status, 403);
+    const privateDocument = await fetch(base + '/api/document-uploads/' + attachment.id, { headers: { Authorization: 'Bearer ' + token } });
+    assert.equal(privateDocument.status, 200); assert.equal(privateDocument.headers.get('content-type'), 'application/octet-stream');
+    assert.match(privateDocument.headers.get('content-disposition'), /filename\*=UTF-8''patient%20report\.pdf/);
+    assert.equal(privateDocument.headers.get('x-content-type-options'), 'nosniff');
+    assert.deepEqual(Buffer.from(await privateDocument.arrayBuffer()), documentBytes);
+    const inlineDocument = await fetch(base + '/api/document-uploads/' + attachment.id + '?view=1', { headers: { Authorization: 'Bearer ' + token } });
+    assert.equal(inlineDocument.status, 200); assert.equal(inlineDocument.headers.get('content-type'), 'application/pdf');
+    assert.match(inlineDocument.headers.get('content-disposition'), /^inline;/);
+    assert.deepEqual(Buffer.from(await inlineDocument.arrayBuffer()), documentBytes);
+    assert.equal((await fetch(base + '/uploads/' + attachment.id)).status, 404);
+    assert.equal((await call('POST', '/api/document-uploads', null, token, {
+      'X-Patient-Document-Patient': String(pt.id), 'X-Patient-Document-Name': 'bad.pdf',
+      'X-Patient-Document-Date': '2026-10-14', 'X-Patient-Document-Type': 'unsupported',
+    })).status, 400);
+    ok('patient documents accept arbitrary file content and require authorized private downloads');
     assert.equal((await call('POST', '/api/patients', { name: 'Bad', age_unit: 'Z' })).status, 400); ok('age unit validated');
     assert.equal((await call('POST', '/api/appointments', { name: 'Sok Dara', date: '2026-10-20', time: '09:30', st: 'Waiting' })).body.time, '09:30'); ok('appointment time saved');
     const followUp = await call('POST', '/api/appointments', { name: pt.name, patient_id: pt.id, type: 'Follow Up', svc: 'Review', date: '2026-10-25', time: '09:30', st: 'Waiting', reminder_date: '2026-10-24', reminder_status: 'Pending', notes: 'Bring test results' });
@@ -316,7 +362,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(vit.status, 201); assert.equal(JSON.parse(vit.body.data).bp, '120/80'); ok('vital signs record saved with JSON data');
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'medical', data: { cc: 'Cough', vacc: ['BCG/HepB'], mt: [['d', 'e', 't']] } })).status, 201); ok('medical record saved');
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'beu', title: 'Before', color: '#ef4444', image: '' })).status, 201); ok('BEU record with label colour saved');
-    assert.equal((await call('GET', `/api/records?patient_id=${pt.id}&kind=vitals`)).body.length, 1); assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 3); ok('records filter by patient and kind');
+    assert.equal((await call('GET', `/api/records?patient_id=${pt.id}&kind=vitals`)).body.length, 1); assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 4); ok('records filter by patient and kind');
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'hack' })).status, 400); assert.equal((await call('POST', '/api/records', { patient_id: 99999, kind: 'vitals' })).status, 400);
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'beu', color: 'red' })).status, 400); assert.equal((await call('POST', '/api/records', { kind: 'vitals' })).status, 400); ok('record kind, patient and colour validated');
     assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'medical', data: 'x'.repeat(61000) })).status, 400); assert.equal((await call('POST', '/api/records', { patient_id: pt.id, kind: 'medical', data: '"just a string"' })).status, 400); ok('record data must be a JSON object under 60 KB');
@@ -358,6 +404,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 200);
     assert.equal((await call('DELETE', `/api/patients/${pt.id}`)).status, 200); await new Promise((r) => setTimeout(r, 100));
     assert.equal((await call('GET', `/api/records?patient_id=${pt.id}`)).body.length, 0); assert.equal((await call('GET', `/api/appointments?patient_id=${pt.id}`)).body.length, 0); assert.equal((await fetch(base + '/uploads/' + rp.photo)).status, 404); ok('deleting a patient removes their records, follow-ups and pictures');
+    assert.equal((await call('GET', '/api/document-uploads/' + attachment.id)).status, 404); ok('deleting a patient removes uploaded document files');
 
     for (const kind of ['mrd', 'schedulenote', 'cnf', 'schedule', 'treatment', 'allergy', 'vaccination', 'referral', 'diagnosis_history', 'laborder', 'imagingorder']) assert.equal((await call('POST', '/api/records', { patient_id: (await call('POST', '/api/patients', { name: 'K' + kind })).body.id, kind, title: 'Standard', data: { x: 1 } })).status, 201); ok('MRD, follow-up, clinical orders, and six new patient modules are accepted');
     const printSettings = (await call('PUT', '/api/clinic', { print_header: 'Clinic print heading', print_footer: 'Clinic contact footer', print_template: { paperSize: 'A4', orientation: 'landscape', marginMm: 10, fontFamily: 'khmer', fontSizePt: 12 }, footer_banner: '0123456789abcdef0123456789abcdef.png', footer_banner_mode: 'image' })).body;

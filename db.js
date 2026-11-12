@@ -9,7 +9,7 @@ try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env fi
 pg.types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
 
 const RES = {
-  patients:      { cols: { name: 's!', latin_name: 's', age: 'i', age_unit: 's', dob: 's', sex: 's', phone: 's', addr: 's', type: 's', room: 's', bed: 's', unpaid: 'b', khmer: 'b', nssf: 'b', pet: 'b', follow_up: 'b', diagnosis: 's', nssf_id: 's', national_id: 's', complaints: 'x', history: 'x', reg_date: 's', photo: 's' }, search: ['name', 'latin_name', 'phone', 'addr', 'nssf_id', 'national_id', 'diagnosis'], order: 'id DESC' },
+  patients:      { cols: { name: 's!', latin_name: 's', age: 'i', age_unit: 's', dob: 's', sex: 's', phone: 's', addr: 's', type: 's', room: 's', bed: 's', unpaid: 'b', unpaid_remark: 'x', khmer: 'b', nssf: 'b', pet: 'b', follow_up: 'b', diagnosis: 's', nssf_id: 's', national_id: 's', complaints: 'x', history: 'x', reg_date: 's', photo: 's' }, search: ['name', 'latin_name', 'phone', 'addr', 'nssf_id', 'national_id', 'diagnosis'], order: 'id DESC' },
   appointments:  { cols: { name: 's!', svc: 's', date: 's', time: 's', doc: 's', phone: 's', st: 's', patient_id: 'i', type: 's', reminder_date: 's', reminder_status: 's', telesales: 's', pancake: 's', description: 'x', notes: 'x' }, search: ['name', 'svc', 'doc', 'phone', 'description', 'notes'], order: 'date DESC, id DESC' },
   ipd:           { cols: { name: 's!', code: 's', room: 's', bed: 's', paid: 'b', out: 'b' }, search: ['name', 'code', 'room', 'bed'], order: 'id DESC' },
   doctors:       { cols: { name: 's!', role: 's', code: 's!', phone: 's', av: 's', workdays: 's', photo: 's', signature: 'j', department: 's', specialist: 's', epf_no: 's', basic_salary_cents: 'i', contract_type: 's', work_location: 's', date_joined: 's' }, search: ['name', 'code', 'role'], order: 'id' },
@@ -22,7 +22,7 @@ const RES = {
   labcategories: { cols: { name: 's!' }, search: ['name'], order: 'LOWER(name)' },
   echo:          { cols: { name: 's!', price: 'i', font: 's', sections: 'x', fields: 'x' }, search: ['name'], order: 'LOWER(name)' },
   diagnoses:     { cols: { name: 's!' }, search: ['name'], order: 'LOWER(name)' },
-  prescriptions: { cols: { name: 's!', meds: 's' }, search: ['name', 'meds'], order: 'LOWER(name)' },
+  prescriptions: { cols: { name: 's!', meds: 'x' }, search: ['name', 'meds'], order: 'LOWER(name)' },
   symptoms:      { cols: { name: 's!' }, search: ['name'], order: 'id' },
   addresses:     { cols: { name: 's!' }, search: ['name'], order: 'LOWER(name)' },
   files:         { cols: { name: 's!', content: 'x' }, search: ['name', 'content'], order: 'id DESC' },
