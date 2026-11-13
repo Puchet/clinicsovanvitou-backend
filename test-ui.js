@@ -33,6 +33,11 @@ server.listen(0, '127.0.0.1', async () => {
   assert.match(indexSource, /<div id="lg" hidden>/, 'Login UI should start hidden during session restoration');
   assert.match(indexSource, /id="startup-loading" class="login-loading"/, 'Refresh should show the startup logo while restoring a session');
   assert.match(styleSource, /#lg\[hidden\]\s*\{\s*display:\s*none;/, 'The hidden login attribute should be respected by CSS');
+  assert.match(styleSource, /#v table\.column-resizable-table th,\s*#v table\.column-resizable-table td\s*\{\s*white-space:\s*normal;\s*overflow-wrap:\s*anywhere;/, 'resized table content should wrap within its column');
+  assert.match(styleSource, /column-resize-cell:not\(:last-child\)\s*\{\s*box-shadow:\s*inset -1px 0 rgba\(255, 255, 255, 0\.7\);/, 'resizable columns should have visible white dividers');
+  assert.match(styleSource, /\.patient-list-toolbar > \.tabs button\.on\s*\{[^}]*border:\s*1px solid #2563eb;[^}]*border-radius:\s*8px;[^}]*box-shadow:/, 'the selected patient tab should have a rounded blue border');
+  assert.match(styleSource, /\.patient-list-actions\s*\{\s*display:\s*flex;[^}]*margin-left:\s*auto;/, 'patient list action buttons should align to the right of the toolbar');
+  assert.match(styleSource, /\.patient-list-actions\s*\{[^}]*justify-content:\s*flex-end;/, 'patient list action buttons should align to the right on small screens');
   assert.match(appSource, /if\(tok&&!needSetup\)\s*\{[\s\S]*?\$\('#lg'\)\.style\.display='none'/, 'A saved session should be restored before login can be shown');
   vm.runInContext(inlineScript[1], ctx);
   for (const [hostname, expectedApiBase] of [
@@ -52,6 +57,45 @@ server.listen(0, '127.0.0.1', async () => {
     await (await fetch(base + '/api/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     run(`tok=null`); const lg = await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@b.cc', password: 'password123' }) })).json();
     ctx.__t = lg.token; run('tok=__t; toast=function(m){__toast=m}'); await run('load()'); ok('app loads data from the API');
+    const nativeQueryAll = ctx.document.querySelectorAll, nativeCreateElement = ctx.document.createElement;
+    const nativeStorageGet = ctx.localStorage.getItem, nativeStorageSet = ctx.localStorage.setItem;
+    const nativeBodyClassList = ctx.document.body.classList;
+    const resizedValues = new Map(), resizeClassNames = new Set();
+    const resizeTable = {
+      id: 'resize-test', className: 'resize-test', dataset: {}, style: {}, children: [], rows: [],
+      classList: { add: (name) => resizeClassNames.add(name) },
+      insertBefore(node, before) { this.children.splice(Math.max(0, this.children.indexOf(before)), 0, node); },
+      replaceChild(node, before) { this.children[this.children.indexOf(before)] = node; }
+    };
+    const resizeHeaderRow = { tagName: 'TR', cells: [] };
+    const resizeWidths = [100, 120, 110];
+    resizeHeaderRow.cells = resizeWidths.map((width, index) => ({
+      tagName: 'TH', dataset: {}, colSpan: 1, parentElement: resizeHeaderRow,
+      classList: { add() {} },
+      getBoundingClientRect: () => ({ width, right: resizeWidths.slice(0, index + 1).reduce((sum, value) => sum + value, 0) }),
+      closest: (selector) => selector == 'table' ? resizeTable : selector.includes('column-resizable-table') ? resizeHeaderRow.cells[index] : null
+    }));
+    resizeTable.rows = [resizeHeaderRow];
+    resizeTable.children.push(resizeHeaderRow);
+    ctx.document.querySelectorAll = () => [resizeTable];
+    ctx.document.createElement = (tag) => ({ tagName: tag.toUpperCase(), style: {}, children: [], appendChild(child) { this.children.push(child); } });
+    ctx.document.body.classList = { add: (name) => resizeClassNames.add(name), remove: (name) => resizeClassNames.delete(name) };
+    ctx.localStorage.getItem = (key) => resizedValues.get(key) || null;
+    ctx.localStorage.setItem = (key, value) => resizedValues.set(key, String(value));
+    run('prepareColumnResizing()');
+    const resizeStart = listeners.pointerdown.find((listener) => listener.toString().includes('column-resizable-table'));
+    const resizeMove = listeners.pointermove.find((listener) => listener.toString().includes('startWidths'));
+    const resizeFinish = listeners.pointerup.find((listener) => listener.toString().includes('finishColumnResize'));
+    resizeStart({ target: resizeHeaderRow.cells[0], button: 0, clientX: 99, preventDefault() {} });
+    resizeMove({ clientX: 129, preventDefault() {} });
+    resizeFinish();
+    run('prepareColumnResizing()');
+    const savedResizeCols = resizeTable.children.find((child) => child.tagName == 'COLGROUP').children;
+    assert.ok(resizeClassNames.has('column-resizable-table') && savedResizeCols[0].style.width == '130px' && savedResizeCols[1].style.width == '90px', 'table column resizing should resize adjacent columns and restore saved widths');
+    ctx.document.querySelectorAll = nativeQueryAll; ctx.document.createElement = nativeCreateElement;
+    ctx.document.body.classList = nativeBodyClassList;
+    ctx.localStorage.getItem = nativeStorageGet; ctx.localStorage.setItem = nativeStorageSet;
+    ok('table columns can be resized and saved');
     const paymentTarget = await run(`api('POST','patients',{name:'Payment Target Patient',type:'OPD',unpaid:0})`);
     const previouslyOpened = await run(`api('POST','patients',{name:'Previously Opened Patient',type:'OPD',unpaid:0})`);
     await run(`api('POST','records',{patient_id:${paymentTarget.id},kind:'schedule',date:'2026-10-14',data:{billable:true,amount:500}})`);
@@ -85,6 +129,22 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(run('D.clinic.print_header'), 'Template header'); assert.equal(run('D.clinic.print_footer'), 'Template footer');
     run(`printDoc('Template output','<p>Document body</p>')`);
     assert.ok(els['#pa'].innerHTML.includes('Template heading') && els['#pa'].innerHTML.includes('print-template-elements-header') && els['#pa'].innerHTML.includes('Document body'), 'saved design elements should render with every printed form');
+    let resolvePrintImage;
+    const printImageReady = new Promise((resolve) => { resolvePrintImage = resolve; });
+    let imageReadinessPrintCalls = 0;
+    let imageDecodeCalls = 0;
+    const nativeWindowPrint = ctx.window.print;
+    els['#pa'].querySelectorAll = (selector) => selector == 'img' ? [{ decode() { imageDecodeCalls++; return printImageReady; } }] : [];
+    ctx.window.print = () => { imageReadinessPrintCalls++; };
+    assert.equal(run(`$('#pa').querySelectorAll('img').length`), 1, 'print surface should expose its image elements');
+    run(`printDoc('', '<img src="echo.jpg">', { printImmediately: true })`);
+    assert.equal(imageDecodeCalls, 1, 'print images should be decoded before opening the print dialog');
+    assert.equal(imageReadinessPrintCalls, 0, 'printing should wait for report images to finish decoding');
+    resolvePrintImage();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(imageReadinessPrintCalls, 1, 'printing should start after report images are decoded');
+    els['#pa'].querySelectorAll = () => [];
+    ctx.window.print = nativeWindowPrint;
     await clickHandler({target:{closest:()=>({dataset:{a:'templateadd:table'}})},preventDefault(){}});
     assert.ok(run('R.ptpl()').includes('data-template-column="qty"') && run('R.ptpl()').includes('Customize columns'), 'data tables should expose configurable columns in the item properties');
     await run(`api('PUT','clinic',{print_template:{},print_header:'',print_footer:''}).then(c=>D.clinic=c)`);
@@ -177,17 +237,77 @@ server.listen(0, '127.0.0.1', async () => {
     assert.ok(els['#mf'].innerHTML.includes('1 tablet') && els['#mf'].innerHTML.includes('Update Template'));
     ok('prescription template editor saves four medicines with dosage fields and supports edits');
     ctx.__appointmentView = run('({appointments:D.ap,query:q,route:rt,calendar:{...cal}})');
-    run(`D.ap=[{id:91001,name:'Regular appointment test',type:'',date:'2031-02-02',time:'09:00',st:'Waiting'},{id:91002,name:'Follow-up test',type:'Follow Up',date:'2031-02-02',time:'10:00',st:'Waiting'}];q='';rt='ap';cal={mode:'day',d:new Date('2031-02-02T12:00:00'),list:false}`);
+    ctx.__appointmentPatients = run('D.pt.slice()');
+    run(`D.pt.push({id:91003,name:'Regular appointment test',phone:'093733375'});D.ap=[{id:91001,patient_id:91003,name:'Regular appointment test',type:'',date:'2031-02-02',time:'09:00',doc:'Dr Test',phone:'012345678',telesales:'Call back',notes:'Bring records',svc:'MMR',pancake:'Offer',st:'Waiting'},{id:91002,name:'Follow-up test',type:'Follow Up',date:'2031-02-02',time:'10:00',st:'Waiting'},{id:91004,name:'Other date appointment',date:'2031-02-03',time:'11:00',st:'Waiting'}];q='';appointmentDateFilter='';rt='ap';cal={mode:'day',d:new Date('2031-02-02T12:00:00'),list:false}`);
     const appointmentCalendar = run('R.ap()');
     assert.ok(appointmentCalendar.includes('Regular appointment test') && !appointmentCalendar.includes('Follow-up test'), 'Appointments calendar should not include Follow Up records');
     run('cal.list=true');
     const appointmentList = run('R.ap()');
     assert.ok(appointmentList.includes('Regular appointment test') && !appointmentList.includes('Follow-up test'), 'Appointments list should not include Follow Up records');
+    assert.ok(appointmentList.includes('id="appointment-date-filter"') && appointmentList.includes('type="date"') && appointmentList.includes('Other date appointment'), 'Appointment list should include a date picker and initially show all dates');
+    const appointmentColumns = ['no', 'name', 'date', 'time', 'notes', 'service', 'doctor', 'phone', 'status', 'actions'];
+    assert.ok(appointmentColumns.every((column) => appointmentList.includes(`data-column="${column}"`)), 'Appointment list should show the screenshot columns in its table header');
+    assert.ok(!appointmentList.includes('data-column="telesales"') && appointmentList.includes('2/2/2031') && appointmentList.includes('09:00') && appointmentList.includes('Dr Test') && appointmentList.includes('Bring records') && appointmentList.includes('MMR') && appointmentList.includes('<a class="appointment-list-phone" href="tel:093733375" aria-label="Call 093733375" title="093733375">☎</a>') && appointmentList.includes('<td>012345678</td>'), 'name-column phone icon should use the patient phone while the Phone column keeps the appointment phone');
+    assert.ok(appointmentList.includes('class="btn s appointment-note-edit" data-a="apnoteedit:91001"') && appointmentList.includes('aria-label="Edit note"'), 'the Note column should include an edit icon');
+    assert.ok(appointmentList.includes('data-a="open:91003"') && appointmentList.includes('class="appointment-list-name" href="#"'), 'linked patient names should open the patient file');
+    assert.ok(appointmentList.includes('data-a="apedit:91001"'), 'appointment list editing should use the appointment-specific form');
+    assert.ok(appointmentList.indexOf('data-column="date"') < appointmentList.indexOf('data-column="time"') && appointmentList.indexOf('data-column="notes"') < appointmentList.indexOf('data-column="service"') && appointmentList.indexOf('data-column="service"') < appointmentList.indexOf('data-column="doctor"'), 'Appointment columns should place Doctor next to Service');
+    const appointmentDateChange = listeners.change.find((listener) => listener.toString().includes('appointment-date-filter'));
+    appointmentDateChange({ target: { id: 'appointment-date-filter', value: '2031-02-02' } });
+    const filteredAppointmentList = run('R.ap()');
+    assert.ok(filteredAppointmentList.includes('Regular appointment test') && !filteredAppointmentList.includes('Other date appointment'), 'selecting an appointment date should filter the list');
+    appointmentDateChange({ target: { id: 'appointment-date-filter', value: '' } });
+    assert.ok(run('R.ap()').includes('Other date appointment'), 'clearing the appointment date filter should show all dates again');
+    assert.ok(appointmentList.includes('data-a="apconfirm:91001"') && appointmentList.includes('appointment-confirm'), 'Waiting appointments should have a confirm icon in Actions');
+    run('__appointmentNativeApi=api;__appointmentNativeLoad=load;__appointmentNativeRender=render');
+    run(`api=async(method,path,payload)=>{D.ap[0].st=payload.st;__appointmentConfirm={method,path,payload}};load=async()=>{};render=()=>{}`);
+    await run('confirmAppointment(91001)');
+    assert.equal(run('D.ap[0].st'), 'Confirmed', 'the confirm icon should mark the appointment as confirmed');
+    assert.ok(run('__appointmentConfirm.method') == 'PUT' && run('__appointmentConfirm.path') == 'appointments/91001' && run('__appointmentConfirm.payload.st') == 'Confirmed', 'confirming should save the appointment status');
+    assert.ok(!run('R.ap()').includes('data-a="apconfirm:91001"'), 'confirmed appointments should no longer show the confirm icon');
+    run('api=__appointmentNativeApi;load=__appointmentNativeLoad;render=__appointmentNativeRender');
+    run('__appointmentNoteApi=api;__appointmentNoteLoad=load;__appointmentNoteRender=render;api=(method,path,payload)=>{__savedAppointmentNote={method,path,payload};return Promise.resolve()};load=async()=>{};render=()=>{}');
+    run(`pAct('apnoteedit','91001')`);
+    assert.ok(els['#mf'].innerHTML.includes('name="notes"') && els['#mf'].innerHTML.includes('Bring records'), 'the Note edit icon should open the current appointment note');
+    els['#mf'].__m = { notes: 'Updated appointment note' };
+    await els['#mf'].onsubmit({ target: els['#mf'], preventDefault() {} });
+    assert.ok(run('__savedAppointmentNote.method') == 'PUT' && run('__savedAppointmentNote.path') == 'appointments/91001' && run('__savedAppointmentNote.payload.notes') == 'Updated appointment note', 'saving from the Note edit icon should update only the appointment note');
+    run('api=__appointmentNoteApi;load=__appointmentNoteLoad;render=__appointmentNoteRender');
+    run('__appointmentPhoneApi=api;__appointmentPhoneLoad=load;__appointmentPhoneRender=render;api=(method,path,payload)=>{__savedAppointmentPhone=payload;return Promise.resolve()};load=async()=>{};render=()=>{}');
+    run(`apOpen({id:91001,name:'Phone zero test',svc:'',date:'2031-02-02',time:'',doc:'',phone:'093733375',st:'Waiting',notes:'Original note'})`);
+    els['#mf'].__m = { name: 'Phone zero test', svc: '', date: '2031-02-02', time: '', doc: '', phone: '093733375', st: 'Waiting', notes: 'Keep this note' };
+    run(`$('#mf [name="phone"]')`);
+    els['#mf [name="phone"]'].value = '093733375';
+    assert.ok(els['#mf'].innerHTML.includes('name="notes"') && run(`Object.fromEntries(new FormData($('#mf'))).notes`) == 'Keep this note', 'appointment edit form should collect the Note field');
+    await els['#mf'].onsubmit({ target: els['#mf'], preventDefault() {} });
+    assert.equal(run('typeof __savedAppointmentPhone.phone'), 'string');
+    assert.equal(run('__savedAppointmentPhone.phone'), '093733375', 'saving an appointment should preserve a leading zero in its phone number');
+    assert.equal(run('__savedAppointmentPhone.notes'), 'Keep this note', 'saving an appointment should persist its note');
+    run('api=__appointmentPhoneApi;load=__appointmentPhoneLoad;render=__appointmentPhoneRender');
     run(`rt='fu';cal.list=false`);
     const separateFollowUpList = run('R.fu()');
     assert.ok(separateFollowUpList.includes('Follow-up test') && !separateFollowUpList.includes('Regular appointment test'), 'Follow Up page should contain only Follow Up records');
-    run('D.ap=__appointmentView.appointments;q=__appointmentView.query;rt=__appointmentView.route;cal=__appointmentView.calendar');
+    run('D.ap=__appointmentView.appointments;D.pt=__appointmentPatients;q=__appointmentView.query;rt=__appointmentView.route;cal=__appointmentView.calendar');
     ok('Appointments and Follow Up are shown in separate views');
+    const pickerSymptom = await run(`api('POST','symptoms',{name:'UI picker symptom'})`);
+    const symptomsPatient = await run(`api('POST','patients',{name:'Symptoms UI patient',type:'OPD',complaints:'Cough & fever'})`);
+    await run('load()');
+    run(`rt='pt';tab='OPD';q='';ptColsOpen=false`);
+    const symptomsPatientList = run('R.pt()');
+    assert.ok(symptomsPatientList.includes('pt-col-comp') && symptomsPatientList.indexOf('Treatment') < symptomsPatientList.indexOf('Symptoms') && symptomsPatientList.includes('>Cough &amp; fever <a href="#" class="ed" data-a="ptcomp:') && symptomsPatientList.includes(`data-a="ptcomp:${symptomsPatient.id}"`), 'Patients list should show symptoms after treatment with an edit action');
+    run(`pAct('ptcomp',${symptomsPatient.id})`);
+    assert.ok(els['#mf'].innerHTML.includes('name="complaints"') && els['#mf'].innerHTML.includes('Cough &amp; fever') && els['#mf'].innerHTML.includes('>UI picker symptom</option>'), 'Symptoms editor should show the saved note and Manage Symptoms options');
+    const selectedSymptomText = { value: 'Cough & fever' };
+    const symptomPicker = { dataset: { fill: 'complaints' }, value: pickerSymptom.name, parentElement: { querySelector: () => selectedSymptomText } };
+    listeners.change.find((listener) => listener.toString().includes('t.dataset && t.dataset.fill'))({ target: symptomPicker });
+    assert.equal(selectedSymptomText.value, 'Cough & fever, UI picker symptom', 'selecting a managed symptom should append it to the patient note');
+    els['#mf'].__m = { complaints: selectedSymptomText.value };
+    await els['#mf'].onsubmit({ preventDefault() {} });
+    assert.equal((await run(`api('GET','patients/${symptomsPatient.id}')`)).complaints, 'Cough & fever, UI picker symptom', 'edited symptoms should be saved to the patient');
+    await run(`api('DELETE','patients/'+${symptomsPatient.id})`);
+    await run(`api('DELETE','symptoms/'+${pickerSymptom.id})`);
+    await run('load()');
+    run(`rt='dash'`);
     run('userFormOpen=true;userEditId=null'); const userSettingsHtml = run('R.set()');
     assert.ok(userSettingsHtml.includes('user-management-section') && userSettingsHtml.includes('id="user-form"') && userSettingsHtml.includes('permission_patients_view') && userSettingsHtml.includes('permission_user_management_delete'), 'Settings should render user creation and a custom section/action permission matrix');
     ctx.__adminUser = run('D.user'); run("D.user={id:999,role:'staff',permissions:blankPermissions()};D.user.permissions.patients.view=true;rt='pt'");
@@ -245,7 +365,7 @@ server.listen(0, '127.0.0.1', async () => {
     ctx.fetch = originalFetch;
     run('tok=__savedLoginToken');
     ok('login shows and clears the animated logo loading state');
-    run(`D.pt=[{id:123,name:'Follow Up Patient',phone:'012 345'},{id:124,name:'No Follow Up Patient',phone:'099'}];D.ap=[{id:456,patient_id:123,type:'Follow Up',name:'Follow Up Patient',svc:'Review',date:'2030-01-10',time:'09:30',doc:'Dr A',st:'Waiting',reminder_date:'2020-01-01',reminder_status:'Pending'}];q='';rt='fu'`);
+    run(`D.pt=[{id:123,name:'Follow Up Patient',phone:'012 345',created_at:'2030-01-02T00:00:00.000Z'},{id:124,name:'No Follow Up Patient',phone:'099',created_at:'2030-01-01T00:00:00.000Z'}];D.ap=[{id:456,patient_id:123,type:'Follow Up',name:'Follow Up Patient',svc:'Review',date:'2030-01-10',time:'09:30',doc:'Dr A',st:'Waiting',reminder_date:'2020-01-01',reminder_status:'Pending',created_at:'2030-01-02T00:00:00.000Z'}];q='';rt='fu'`);
     const followUpHtml = run('R.fu()');
     for (const field of ['Follow Up', 'Follow Up Patient', 'Review', 'Reminders due', 'Mark reminder sent', 'data-a="fuedit:456"']) assert.ok(followUpHtml.includes(field), 'Follow Up page missing ' + field);
     run('followUpForm()');
@@ -278,12 +398,12 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(visitDateInput.value, run('patientFollowupDate(ymd(new Date()),3)'), 'day shortcut should calculate the return date');
     const formattedReturnDate = run(`new Intl.DateTimeFormat('en-US').format(new Date('${visitDateInput.value}T12:00:00'))`);
     assert.ok(els['#patient-followup-preview'].innerHTML.includes('1/1/2030') && els['#patient-followup-preview'].innerHTML.includes(formattedReturnDate), 'history preview should show saved follow-up dates and the selected return date');
-    run(`D.ap.push({id:458,patient_id:124,type:'Follow Up',date:'2030-01-11',st:'Waiting'})`);
+    run(`D.ap.push({id:458,patient_id:124,type:'Follow Up',date:'2030-01-11',st:'Waiting',created_at:'2030-01-03T00:00:00.000Z'})`);
     const prioritizedPatients = run('R.pt()');
-    assert.ok(prioritizedPatients.indexOf('data-a="open:124"') < prioritizedPatients.indexOf('data-a="open:123"'), 'patient with the newest active follow-up should move to the top of the Patients list');
+    assert.ok(prioritizedPatients.indexOf('data-a="open:124"') < prioritizedPatients.indexOf('data-a="open:123"'), 'the newest registration should stay at the top despite an older patient follow-up');
     run(`D.ap.find(appointment=>appointment.id==458).st='Done'`);
     const completedFollowupPatients = run('R.pt()');
-    assert.ok(completedFollowupPatients.indexOf('data-a="open:123"') < completedFollowupPatients.indexOf('data-a="open:124"'), 'completed follow-ups should no longer prioritize a patient at the top');
+    assert.ok(completedFollowupPatients.indexOf('data-a="open:123"') < completedFollowupPatients.indexOf('data-a="open:124"'), 'after a follow-up is completed, registration order should decide the list position');
     els['#mf'].querySelector = nativeMfQuerySelector;
     delete els['#mf [name="days_until_return"]'];
     run(`lang='en'`);
@@ -475,11 +595,13 @@ server.listen(0, '127.0.0.1', async () => {
     ok('doctor profile shows payroll history and saved payslips with net salary');
 
     // registration with age modes, flags and vital signs
+    run(`tab='Details';pg=4;q='stale';pf.name='stale'`);
     run('__nativeOpenForm=openForm;openForm=function(t,b,s,o){__body=b;__save=s;__opts=o}'); run('regForm()');
     for (const must of ['Basic information', 'Demographics', 'data-a="agem:dob"', 'name="nssf_id"', 'name="complaints"', 'name="reg_date"', 'data-a="vsbtn"', 'Register Patient']) assert.ok((ctx.__body + ctx.__opts.ok + ctx.__opts.extra).includes(must), 'registration form missing ' + must);
     ok('registration form has every section from the screenshot');
     ctx.__f = { __m: { name: 'Test Patient', latin_name: 'Latin', phone: '012 999', age: '14', age_unit: 'M', sex: 'F', khmer: '1', nssf: '1', pet: null, nssf_id: 'N1', national_id: 'ID9', complaints: 'cough', history: '', addr: 'Phnom Penh', reg_date: '2026-10-14T08:47', vs_t: '37.2', vs_bp: '110/70' } };
     await run('__save(__f)'); const p = run('D.pt.find(x=>x.name=="Test Patient")'); assert.ok(p); assert.equal(p.nssf, 1); assert.equal(p.pet, 0); assert.equal(p.age, 14); assert.equal(p.age_unit, 'M');
+    assert.equal(run('tab'), 'OPD'); assert.equal(run('pg'), 1); assert.equal(run('q'), ''); assert.equal(run('Object.keys(pf).length'), 0, 'new registration should be visible without stale search filters');
     assert.equal(run(`fmtAge(D.pt.find(x=>x.name=="Test Patient"))`), '1 y 2 m'); ok('patient registered; 14 months shown as "1 y 2 m"');
     ctx.__patientIpdSnapshot = run('D.ipd.slice()');
     run(`D.pt.find(x=>x.id==${p.id}).type='IPD';D.ipd=[{id:991,code:'${p.id}',room:'A-01',bed:'B-02',out:0}];tab='IPD'`);
@@ -502,7 +624,17 @@ server.listen(0, '127.0.0.1', async () => {
     ok('patient list shows zero balances as Paid and separates outstanding balances');
     ctx.__f = { __m: { name: 'Baby', age: '', age_unit: 'Y', dob: '2026-04-14', khmer: '1' } }; run('__body=null'); run('$("#agebox").dataset.mode="dob"'); await run('__save(__f)'); const baby = run('D.pt.find(x=>x.name=="Baby")'); assert.equal(baby.age_unit, 'M'); assert.ok(baby.age >= 5 && baby.age <= 7); ok('date-of-birth mode computes age in months');
     run(`tab="OPD";q="";Object.keys(pf).forEach(key=>delete pf[key]);D.pt.find(x=>x.id==${p.id}).updated_at='2030-01-01T00:00:00.000Z';D.pt.find(x=>x.name=="Baby").updated_at='2029-01-01T00:00:00.000Z'`);
-    assert.equal(run('ptRows()[0][0].id'), p.id, 'the most recently updated patient should appear at the top of the patient list');
+    assert.equal(run('ptRows()[0][0].name'), 'Baby', 'the newest registration should stay at the top even when an older patient was updated later');
+    const nativePatientFollowupQuerySelector = els['#mf'].querySelector;
+    els['#mf'].querySelector = (selector) => selector.includes('days_until_return') ? { value: '1' } : { value: '2026-11-13' };
+    run(`D.ap=[];tab='Details';pg=4;q='stale';pf.name='stale';patientFollowupScheduleForm(${p.id})`);
+    ctx.__f = { __m: { date: '2026-11-13', days_until_return: '1', categories: ['OPD'] } };
+    await run('__save(__f)');
+    assert.equal(run('rt'), 'pt'); assert.equal(run('tab'), 'NSSF'); assert.equal(run('pg'), 1); assert.equal(run('q'), '');
+    assert.equal(run('ptRows()[0][0].id'), p.id, 'saving a follow-up confirmation should move that patient to the top of the list');
+    els['#mf'].querySelector = nativePatientFollowupQuerySelector;
+    const savedFollowUpId = run(`D.ap.find(appointment=>appointment.patient_id==${p.id}&&appointment.type=='Follow Up').id`);
+    await run(`api('DELETE','appointments/'+${savedFollowUpId})`); await run('load()');
 
     // patient file
     await run(`openPatient(${p.id})`); assert.equal(run('rt'), 'pd');
@@ -1335,6 +1467,7 @@ server.listen(0, '127.0.0.1', async () => {
 
     run("modal('Add appointment',P.ap.f,{st:'Waiting',date:'2026-10-20',time:''},()=>{})"); const mh = els['#mf'].innerHTML;
     assert.ok(mh.includes('type="date"') && mh.includes('type="time"') && mh.includes('<select class="in" name="st">') && mh.includes('<option value="Cancelled"') && /name="name"[^>]*required/.test(mh) && !/name="phone"[^>]*required/.test(mh)); ok('appointment form has date, time and status pickers; only the name is required');
+    assert.ok(mh.indexOf('<select class="in" name="st">') < mh.indexOf('<textarea class="in" name="notes"'), 'appointment note text box should appear below Status');
 
     // ---- Medical Record toolbar: HT Controls, History, MRD ----
     run('ptab="medical"'); html = run('recPanel()'); for (const must of ['data-a="htc"', 'data-a="mhist"', 'data-a="mrd"', 'data-a="radd"']) assert.ok(html.includes(must), 'medical toolbar missing ' + must); ok('Medical Record tab has gear, History, MRD and Add buttons');
