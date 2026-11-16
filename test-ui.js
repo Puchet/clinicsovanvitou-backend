@@ -35,7 +35,7 @@ server.listen(0, '127.0.0.1', async () => {
   assert.match(styleSource, /#lg\[hidden\]\s*\{\s*display:\s*none;/, 'The hidden login attribute should be respected by CSS');
   assert.match(styleSource, /#v table\.column-resizable-table th,\s*#v table\.column-resizable-table td\s*\{\s*white-space:\s*normal;\s*overflow-wrap:\s*anywhere;/, 'resized table content should wrap within its column');
   assert.match(styleSource, /column-resize-cell:not\(:last-child\)\s*\{\s*box-shadow:\s*inset -1px 0 rgba\(255, 255, 255, 0\.7\);/, 'resizable columns should have visible white dividers');
-  assert.match(styleSource, /\.patient-list-toolbar > \.tabs button\.on\s*\{[^}]*border:\s*1px solid #2563eb;[^}]*border-radius:\s*8px;[^}]*box-shadow:/, 'the selected patient tab should have a rounded blue border');
+  assert.match(styleSource, /\.patient-list-toolbar > \.tabs button\.on\s*\{[^}]*border:\s*1px solid #033993;[^}]*border-radius:\s*8px;[^}]*box-shadow:/, 'the selected patient tab should have a rounded blue border');
   assert.match(styleSource, /\.patient-list-actions\s*\{\s*display:\s*flex;[^}]*margin-left:\s*auto;/, 'patient list action buttons should align to the right of the toolbar');
   assert.match(styleSource, /\.patient-list-actions\s*\{[^}]*justify-content:\s*flex-end;/, 'patient list action buttons should align to the right on small screens');
   assert.match(appSource, /if\(tok&&!needSetup\)\s*\{[\s\S]*?\$\('#lg'\)\.style\.display='none'/, 'A saved session should be restored before login can be shown');
@@ -309,7 +309,16 @@ server.listen(0, '127.0.0.1', async () => {
     await run('load()');
     run(`rt='dash'`);
     run('userFormOpen=true;userEditId=null'); const userSettingsHtml = run('R.set()');
-    assert.ok(userSettingsHtml.includes('user-management-section') && userSettingsHtml.includes('id="user-form"') && userSettingsHtml.includes('permission_patients_view') && userSettingsHtml.includes('permission_user_management_delete'), 'Settings should render user creation and a custom section/action permission matrix');
+    assert.ok(userSettingsHtml.includes('user-management-section') && userSettingsHtml.includes('id="user-form"') && userSettingsHtml.includes('name="role"') && userSettingsHtml.includes('value="doctor"') && userSettingsHtml.includes('value="receptionist"') && userSettingsHtml.includes('permission_patients_view') && userSettingsHtml.includes('permission_user_management_delete'), 'Settings should render role selection and a custom section/action permission matrix');
+    const currentAdminId = run('D.user.id'), otherAdminId = currentAdminId + 1000;
+    run(`D.__savedUsers=D.users;D.__savedUser=D.user;D.user={id:${currentAdminId},role:'admin',permissions:null};D.users=[{id:${currentAdminId},name:'Current admin',email:'admin@clinic.test',role:'admin'},{id:${otherAdminId},name:'Other admin',email:'other-admin@clinic.test',role:'admin'}]`);
+    const adminDeleteActions = run('userManagementHtml()');
+    assert.ok(adminDeleteActions.includes(`data-a="useredit:${currentAdminId}"`) && adminDeleteActions.includes(`data-a="useredit:${otherAdminId}"`) && !adminDeleteActions.includes(`data-a="userdelete:${currentAdminId}"`) && adminDeleteActions.includes(`data-a="userdelete:${otherAdminId}"`), 'Administrators should be able to edit all admin accounts and delete other admins, but not themselves');
+    run(`userEditId=${otherAdminId};userFormOpen=true`);
+    const adminEditForm = run('userManagementHtml()');
+    assert.ok(adminEditForm.includes('name="role" id="user-role"') && adminEditForm.includes('<option value="admin" selected>Administrator</option>') && adminEditForm.includes('id="user-permission-wrap" hidden'), 'Administrator edit form should allow role selection and hide custom permissions while admin is selected');
+    run('userEditId=null');
+    run('D.users=D.__savedUsers;D.user=D.__savedUser;delete D.__savedUsers;delete D.__savedUser');
     ctx.__adminUser = run('D.user'); run("D.user={id:999,role:'staff',permissions:blankPermissions()};D.user.permissions.patients.view=true;rt='pt'");
     assert.equal(run("pageAllowed('pt')"), true); assert.equal(run("pageAllowed('bill')"), false);
     assert.equal(run("actionAllowed('add','pt')"), false); assert.equal(run("actionAllowed('rprint','')"), false);
@@ -569,7 +578,7 @@ server.listen(0, '127.0.0.1', async () => {
 
     run(`rt='dr';doctorForm()`); let doctorHtml = els['#mf'].innerHTML;
     for (const must of ['Add Doctor', 'Upload Photo', 'Staff ID (Required for Login)', 'Work Shift / Days', 'Department', 'Basic Salary ($)', 'Date Of Joining', 'Signature', 'drsig', 'drsigclear', 'Cancel', 'Save']) assert.ok(doctorHtml.includes(must), 'doctor form missing ' + must + ': ' + doctorHtml);
-    run(`doctorSignature={strokes:[{color:'#2563eb',points:[[0.1,0.2],[0.8,0.7]]}]}`);
+    run(`doctorSignature={strokes:[{color:'#033993',points:[[0.1,0.2],[0.8,0.7]]}]}`);
     els['#mf'].__m = { name: 'Dr. Follow-up', code: 'S002', role: 'Doctor', phone: '012 555 000', workdays: 'Mon-Fri', department: 'OPD', specialist: 'Nurse', basic_salary: '250.50', contract_type: 'Permanent', work_location: 'Main Clinic', date_joined: '2026-09-18', photo: '' };
     await run(`$('#mf').onsubmit({preventDefault(){}})`);
     const doctor = run(`D.dr.find(x=>x.code=='S002')`);
@@ -1215,7 +1224,7 @@ server.listen(0, '127.0.0.1', async () => {
     run(`$('#tf-print-date').value='';tfPrintAll()`);
     assert.equal(ctx.__toast, 'Select a date before printing.', 'printing should require a selected table date');
     const printStyles = fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8');
-    assert.match(printStyles, /#pa \.tf-print-table th\s*\{[^}]*background:\s*#2563eb;[^}]*color:\s*#fff;/s, 'Treatment Follow-up chart header should print blue with white text');
+    assert.match(printStyles, /#pa \.tf-print-table th\s*\{[^}]*background:\s*#033993;[^}]*color:\s*#fff;/s, 'Treatment Follow-up chart header should print blue with white text');
     assert.equal((treatmentPrint.match(/class="tf-print-blank"/g) || []).length, 0, 'Treatment Follow-up printout should not add empty rows');
     assert.match(printStyles, /#pa \.tf-print-table td\s*\{[^}]*height:\s*18mm;/s, 'Treatment Follow-up chart rows should leave enough space while fitting short records on one page');
     run(`$('#tf-print-date').value='2026-10-24';tfHistory.push({id:987654,date:"2026-10-16",notes:"",data:"{}"});tfPrintAll()`);
@@ -1531,7 +1540,7 @@ server.listen(0, '127.0.0.1', async () => {
     const paymentStyles = fs.readFileSync(path.join(frontendDir, 'styles.css'), 'utf8');
     assert.match(paymentStyles, /\.payall-discount-dialog\s*\{[^}]*width:\s*min\(565px,\s*calc\(100vw - 32px\)\)/s, 'discount dialog should fit within the viewport');
     assert.match(paymentStyles, /#md \.payall-discount-entry \.in\s*\{[^}]*min-width:\s*0;/s, 'discount inputs should not overflow the dialog grid');
-    assert.match(paymentStyles, /\.payall-items th\s*\{[^}]*color:\s*#2563eb;/s, 'Pay All table headers should use blue text');
+    assert.match(paymentStyles, /\.payall-items th\s*\{[^}]*color:\s*#033993;/s, 'Pay All table headers should use blue text');
     assert.equal(run('payAllCalculation(80000,5,"USD").discount'), 20000);
     assert.equal(run('payAllCalculation(80000,5,"USD").finalTotal'), 60000);
     assert.equal(run('payAllDiscountCalculation([{price:100},{price:200}],[1],30,"KHR").finalTotal'), 270);
@@ -2044,7 +2053,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.match(centerCss, /#md \.center-checks \.cb\s*\{[^}]*font-size:\s*13px;/s, 'center checkbox text should be larger');
     assert.match(centerCss, /\.center-print-table\s*\{[^}]*table-layout:\s*fixed;/s, 'center form print should use the fixed register table layout');
     assert.match(centerCss, /\.center-print-table th,\s*\.center-print-table td\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s, 'center form print text should wrap within each column');
-    assert.match(centerCss, /\.center-print-table th,\s*\.center-print-table td\s*\{[^}]*border:\s*0\.3mm solid #2563eb;[^}]*background:\s*#fff;[^}]*color:\s*#2563eb;/s, 'center print cells should use a consistent stronger blue border and blue text on white');
+    assert.match(centerCss, /\.center-print-table th,\s*\.center-print-table td\s*\{[^}]*border:\s*0\.3mm solid #033993;[^}]*background:\s*#fff;[^}]*color:\s*#033993;/s, 'center print cells should use a consistent stronger blue border and blue text on white');
     assert.match(centerCss, /\.center-print-table \.center-print-option span\s*\{[^}]*width:\s*20mm;[^}]*overflow:\s*hidden;[^}]*font-size:\s*5pt;[^}]*transform:\s*translate\(-50%, -50%\) rotate\(-90deg\);/s, 'rotated register option labels should stay inside their narrow columns');
     run("pAct('centeraddrow')"); assert.equal(els['#mf'].dataset.centerRowCount, '2');
     run("pAct('centerremoverow','1')"); assert.equal(els['#mf'].dataset.centerRowCount, '1');

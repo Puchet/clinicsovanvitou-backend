@@ -1,6 +1,6 @@
-# Sovanvitou backend
+# BA Hospital Management System backend
 
-REST API + web app host for the Sovanvitou hospital management system, backed by **PostgreSQL**.
+REST API + web app host for BA Hospital Management System, backed by **PostgreSQL**.
 
 **Requires Node 22.13 or newer, and PostgreSQL.**
 
@@ -57,7 +57,7 @@ Users with clinic-settings access can open **Administration → Print Templates*
 | GET/PUT        | `/api/clinic`                                      | Clinic settings; requires clinic-settings view/edit permission                                                                                                                                                                                                               |
 | POST           | `/api/uploads`                                     | Raw JPG/PNG/WebP body (max 2 MB); returns `{photo}` to store on a record                                                                                                                                                                                                    |
 | GET/POST       | `/api/users`                                      | Requires user-management view/create permission; newly created accounts use custom permissions                                                                                                                                                                               |
-| PUT/DELETE     | `/api/users/:id`                                  | Requires user-management edit/delete permission; cannot change your own staff permissions, delete your own account, or delete an administrator account                                                                                                                       |
+| PUT/DELETE     | `/api/users/:id`                                  | Requires user-management edit/delete permission; only administrators can change admin roles or edit/delete other admins; cannot delete your own account; the last admin cannot be deleted or demoted                                                                 |
 | GET/POST       | `/api/<resource>`                                  | Requires the resource's corresponding view/create permission; `?q=` search, `?limit=&offset=`; `X-Total-Count` header                                                                                                                                                       |
 | GET/PUT/DELETE | `/api/<resource>/:id`                              | Requires the corresponding view/edit/delete permission                                                                                                                                                                                                                       |
 | GET            | `/api/records?patient_id=&kind=`                   | Patient file entries are filtered by clinical, appointment/IPD, and finance permissions. Record kinds include `vitals`, `medical`, `mdhistory`, `beu`, `schedule`, `payment`, `treatment`, `consultation`, `operation`, `investigation`, `lab`, `echo`, `xray`, `homecare`, `prescription`, `medlist`, and `documents`. Any column can be used as an exact-match filter |

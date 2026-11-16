@@ -1,7 +1,7 @@
 {
-  "name": "sovanvitou-backend",
+  "name": "ba-hospital-management-system-backend",
   "version": "1.0.0",
-  "description": "REST API + static host for the Sovanvitou hospital management app (PostgreSQL, Node 22+)",
+  "description": "REST API + static host for BA Hospital Management System (PostgreSQL, Node 22+)",
   "private": true,
   "engines": {
     "node": ">=22.13"

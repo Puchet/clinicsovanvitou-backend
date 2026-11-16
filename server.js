@@ -532,6 +532,7 @@ const PERMISSION_AREAS = {
   user_management: ['users'],
 };
 const PERMISSION_ACTIONS = ['view', 'create', 'edit', 'delete', 'print'];
+const USER_ROLES = ['admin', 'doctor', 'staff', 'receptionist'];
 function defaultStaffPermissions() {
   return Object.fromEntries(Object.keys(PERMISSION_AREAS).map((area) => [area,
     ['clinic_settings', 'user_management'].includes(area)
@@ -814,16 +815,18 @@ async function api(req, res, url) {
     }
     if (!b && m === 'POST') {
       requirePermission('user_management', 'create');
-      const body = await readJson(req), email = String(body.email || '').trim().toLowerCase();
+      const body = await readJson(req), email = String(body.email || '').trim().toLowerCase(), role = body.role ?? 'staff';
       if (!isEmail(email)) throw bad('Enter a valid email');
       if (String(body.password || '').length < 8) throw bad('Password must be at least 8 characters');
-      if (body.role && body.role !== 'staff') throw bad('New accounts must use the staff role');
+      if (!USER_ROLES.includes(role)) throw bad('Invalid user role');
+      if (role === 'admin' && user.role !== 'admin') throw new HttpError(403, 'Only administrators can create administrator accounts');
+      if (role === 'admin' && body.permissions !== undefined) throw bad('Administrator permissions are fixed');
       if (await queryOne('SELECT 1 FROM users WHERE email=$1', [email])) throw new HttpError(409, 'Email already in use');
-      if (body.permissions === undefined && user.role !== 'admin') throw bad('Custom permissions are required');
-      const access = body.permissions === undefined ? null : grantPermissions(body.permissions);
+      if (role !== 'admin' && body.permissions === undefined && user.role !== 'admin') throw bad('Custom permissions are required');
+      const access = role === 'admin' || body.permissions === undefined ? null : grantPermissions(body.permissions);
       const r = await queryOne('INSERT INTO users(email,name,role,permissions,pass) VALUES($1,$2,$3,$4,$5) RETURNING id',
-        [email, String(body.name || email.split('@')[0]).slice(0, 100), 'staff', JSON.stringify(access || {}), await hashPw(String(body.password))]);
-      return send(res, 201, { id: r.id, email, name: String(body.name || email.split('@')[0]).slice(0, 100), role: 'staff', permissions: access || defaultStaffPermissions() });
+        [email, String(body.name || email.split('@')[0]).slice(0, 100), role, JSON.stringify(access || {}), await hashPw(String(body.password))]);
+      return send(res, 201, { id: r.id, email, name: String(body.name || email.split('@')[0]).slice(0, 100), role, permissions: role === 'admin' ? null : access || defaultStaffPermissions() });
     }
     if (b && m === 'PUT') {
       requirePermission('user_management', 'edit');
@@ -834,6 +837,14 @@ async function api(req, res, url) {
       if (!target) throw new HttpError(404, 'Not found');
       if (target.role === 'admin' && user.role !== 'admin') throw new HttpError(403, 'Administrator accounts cannot be edited here');
       const body = await readJson(req), fields = [], values = [];
+      const nextRole = body.role ?? target.role;
+      if (body.role !== undefined) {
+        if (!USER_ROLES.includes(nextRole)) throw bad('Invalid user role');
+        if ((target.role === 'admin' || nextRole === 'admin') && user.role !== 'admin') throw new HttpError(403, 'Only administrators can change administrator roles');
+        if (nextRole === 'admin' && body.permissions !== undefined) throw bad('Administrator permissions are fixed');
+        if (target.role === 'admin' && nextRole !== 'admin' && body.permissions === undefined) throw bad('Custom permissions are required when changing an administrator to another role');
+        fields.push(`role=$${fields.length + 1}`); values.push(body.role);
+      }
       if (body.email !== undefined) {
         const email = String(body.email).trim().toLowerCase();
         if (!isEmail(email)) throw bad('Enter a valid email');
@@ -846,12 +857,23 @@ async function api(req, res, url) {
         fields.push(`pass=$${fields.length + 1}`); values.push(await hashPw(String(body.password)));
       }
       if (body.permissions !== undefined) {
-        if (target.role === 'admin') throw bad('Administrator permissions are fixed');
+        if (nextRole === 'admin') throw bad('Administrator permissions are fixed');
         fields.push(`permissions=$${fields.length + 1}`); values.push(JSON.stringify(grantPermissions(body.permissions, target.permissions)));
       }
       if (!fields.length) throw bad('Nothing to update');
       values.push(id);
-      const updated = await queryOne(`UPDATE users SET ${fields.join(',')} WHERE id=$${values.length} RETURNING id,email,name,role,permissions,created_at`, values);
+      const updateSql = `UPDATE users SET ${fields.join(',')} WHERE id=$${values.length} RETURNING id,email,name,role,permissions,created_at`;
+      let updated;
+      if (target.role === 'admin' && nextRole !== 'admin') {
+        const result = await tx(async client => {
+          const admins = await client.query("SELECT id FROM users WHERE role='admin' ORDER BY id FOR UPDATE");
+          if (admins.rowCount <= 1) throw bad('You cannot change the role of the last administrator');
+          return client.query(updateSql, values);
+        });
+        updated = result.rows[0];
+      } else {
+        updated = await queryOne(updateSql, values);
+      }
       return send(res, 200, { ...updated, permissions: updated.role === 'admin' ? null : parsePermissions(updated.permissions) });
     }
     if (b && m === 'DELETE') {
@@ -859,10 +881,17 @@ async function api(req, res, url) {
       const id = Number(b);
       if (!Number.isInteger(id) || id < 1) throw bad('Invalid user ID');
       if (id === user.id) throw bad('You cannot delete your own account');
-      const target = await queryOne('SELECT role FROM users WHERE id=$1', [id]);
-      if (target?.role === 'admin') throw bad('Administrator accounts cannot be deleted here');
-      const r = await query('DELETE FROM users WHERE id=$1', [id]);
-      if (!r.rowCount) throw new HttpError(404, 'Not found');
+      const r = await tx(async client => {
+        const admins = await client.query("SELECT id FROM users WHERE role='admin' ORDER BY id FOR UPDATE");
+        const target = (await client.query('SELECT role FROM users WHERE id=$1 FOR UPDATE', [id])).rows[0];
+        if (!target) return null;
+        if (target.role === 'admin') {
+          if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can delete administrator accounts');
+          if (admins.rowCount <= 1) throw bad('You cannot delete the last administrator account');
+        }
+        return client.query('DELETE FROM users WHERE id=$1', [id]);
+      });
+      if (!r?.rowCount) throw new HttpError(404, 'Not found');
       return send(res, 200, { ok: true });
     }
   }
@@ -1529,7 +1558,7 @@ const server = http.createServer(async (req, res) => {
 if (require.main === module) {
   initDb().then(async () => {
     await initAuth();
-    server.listen(PORT, HOST, () => console.log(`Sovanvitou running at http://${HOST}:${PORT}`));
+    server.listen(PORT, HOST, () => console.log(`BA Hospital Management System running at http://${HOST}:${PORT}`));
     const stop = () => server.close(async () => { await close(); process.exit(0); });
     process.on('SIGTERM', stop); process.on('SIGINT', stop);
   }).catch((err) => {
