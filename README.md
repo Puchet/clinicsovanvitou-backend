@@ -95,3 +95,5 @@ This holds medical records, so treat the following as required, not optional:
 2. **Set `JWT_SECRET`** (32+ random characters) and keep `.env` private.
 3. **Regular PostgreSQL backups** using `pg_dump`.
 4. Check your local health-data and privacy rules before storing real patient information.
+#   b a - h o s p i t a l m a n a g e m e n t - b a c k e n d  
+ 
